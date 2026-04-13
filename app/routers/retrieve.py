@@ -101,7 +101,7 @@ def retrieve(
                 page=payload.get("page", 0),
                 text=text,
                 score=round(hit.score, 4),
-                low_confidence=False,
+                low_confidence=hit.score < settings.RETRIEVAL_SCORE_THRESHOLD,
             )
         )
 
@@ -130,7 +130,7 @@ def retrieve(
                     page=chunk.page,
                     text=chunk.text,
                     score=round(score, 4),
-                    low_confidence=False,
+                    low_confidence=score < settings.RETRIEVAL_SCORE_THRESHOLD,
                 )
             )
 

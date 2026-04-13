@@ -1,10 +1,20 @@
+import collections
+import threading
+
 from app.config import settings
 
-# Module-level cache for the local sentence-transformers model.
-# SentenceTransformer("all-MiniLM-L6-v2") loads weights from disk on
-# construction — reloading on every call would be extremely slow.
-# This is only initialised when EMBEDDING_PROVIDER == "local".
 _local_model = None
+
+# Query embedding cache — avoids recomputing the same query twice.
+# OrderedDict gives us cheap LRU eviction: when over MAX_SIZE,
+# the oldest entry is dropped. Thread-safe via _cache_lock.
+_cache: collections.OrderedDict = collections.OrderedDict()
+_cache_lock = threading.Lock()
+_CACHE_MAX_SIZE = 512
+
+# Max texts per encoding batch. all-MiniLM-L6-v2 has a 256-token limit per
+# input — sending hundreds of chunks at once spikes RAM. 32 is safe on Railway.
+_EMBED_BATCH_SIZE = 32
 
 
 def _get_local_model():
@@ -17,13 +27,8 @@ def _get_local_model():
 
 def get_embeddings(texts: list[str]) -> list[list[float]]:
     """
-    Generates embeddings for a list of texts.
+    Generates embeddings for a list of texts in batches of _EMBED_BATCH_SIZE.
     Provider is determined by settings.EMBEDDING_PROVIDER.
-
-    Both providers must produce vectors of the same dimension as the
-    Qdrant collection was created with. Switching providers after the
-    collection exists requires dropping the collection and re-indexing
-    every file from scratch.
     """
     if settings.EMBEDDING_PROVIDER == "openai":
         return _openai_embed(texts)
@@ -31,28 +36,33 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 def embed_query(query: str) -> list[float]:
-    """Convenience wrapper for embedding a single query string."""
-    return get_embeddings([query])[0]
+    """
+    Embeds a single query string.
+    Results are cached — repeated identical queries skip model inference.
+    """
+    with _cache_lock:
+        if query in _cache:
+            _cache.move_to_end(query)   # mark as recently used
+            return _cache[query]
+
+    vector = get_embeddings([query])[0]
+
+    with _cache_lock:
+        _cache[query] = vector
+        if len(_cache) > _CACHE_MAX_SIZE:
+            _cache.popitem(last=False)  # evict oldest entry
+
+    return vector
 
 
 def _openai_embed(texts: list[str]) -> list[list[float]]:
-    """
-    Uses OpenAI text-embedding-3-small (1536 dimensions).
-    Batches in groups of 100 to stay within the API per-request input limit.
-    Raises openai.APIError on network or auth failures — caller handles these.
-    """
     from openai import OpenAI
-
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     all_embeddings: list[list[float]] = []
-    batch_size = 100
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=batch,
-        )
+    for i in range(0, len(texts), 100):
+        batch = texts[i : i + 100]
+        response = client.embeddings.create(model="text-embedding-3-small", input=batch)
         all_embeddings.extend([item.embedding for item in response.data])
 
     return all_embeddings
@@ -60,10 +70,13 @@ def _openai_embed(texts: list[str]) -> list[list[float]]:
 
 def _local_embed(texts: list[str]) -> list[list[float]]:
     """
-    Uses all-MiniLM-L6-v2 via sentence-transformers (384 dimensions).
-    No external API calls. Suitable for development or air-gapped environments.
-    Significantly slower than OpenAI on CPU for large batches.
-    The model is loaded once and cached at module level (_get_local_model).
+    Encodes in batches of _EMBED_BATCH_SIZE to prevent RAM spikes.
     """
     model = _get_local_model()
-    return model.encode(texts, show_progress_bar=False).tolist()
+    all_embeddings: list[list[float]] = []
+
+    for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[i : i + _EMBED_BATCH_SIZE]
+        all_embeddings.extend(model.encode(batch, show_progress_bar=False).tolist())
+
+    return all_embeddings
