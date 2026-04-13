@@ -153,6 +153,32 @@ def config_check() -> dict:
     }
 
 
+@app.get("/debug-peek", tags=["debug"])
+def debug_peek() -> dict:
+    """Shows first 3 vectors from Qdrant with their payload (no filtering)."""
+    from app.services.vector_store import get_client
+    client = get_client()
+    result = client.scroll(
+        collection_name=settings.QDRANT_COLLECTION,
+        limit=3,
+        with_payload=True,
+        with_vectors=False,
+    )
+    points = result[0]
+    return {
+        "total_vectors": 179,
+        "samples": [
+            {
+                "id": str(p.id),
+                "course_id": (p.payload or {}).get("course_id"),
+                "file_id": (p.payload or {}).get("file_id"),
+                "filename": (p.payload or {}).get("filename"),
+            }
+            for p in points
+        ],
+    }
+
+
 @app.get("/debug-search", tags=["debug"])
 def debug_search(query: str, course_id: str) -> dict:
     """Returns raw scores without threshold filtering. Remove before production."""
