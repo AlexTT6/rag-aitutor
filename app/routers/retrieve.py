@@ -12,21 +12,6 @@ from app.services.vector_store import search_chunks
 router = APIRouter(tags=["retrieve"])
 logger = logging.getLogger(__name__)
 
-
-@router.post("/retrieve/debug", tags=["debug"])
-def retrieve_debug(req: RetrieveRequest, db: Session = Depends(get_db)) -> dict:
-    """Temporary: returns raw Qdrant scores without any threshold filter."""
-    vector = embed_query(req.query)
-    hits = search_chunks(vector, str(req.course_id), top_k=15)
-    return {
-        "threshold_in_use": settings.RETRIEVAL_SCORE_THRESHOLD,
-        "hit_count": len(hits),
-        "scores": [round(h.score, 4) for h in hits],
-        "texts_preview": [
-            (h.payload or {}).get("text", "")[:80] for h in hits
-        ],
-    }
-
 # Dynamic retrieval: if top_k results are all below threshold,
 # retry with a larger top_k before giving up.
 _TOP_K_LADDER = [5, 10, 15]
