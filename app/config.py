@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     RETRIEVAL_SCORE_THRESHOLD: float = 0.70
     MIN_EXTRACTABLE_RATIO: float = 0.50
 
+    # CORS — comma-separated list of allowed origins for the React frontend
+    # Example: "https://myapp.com,https://www.myapp.com"
+    # Use "*" to allow all origins (not recommended for production)
+    ALLOWED_ORIGINS: str = "*"
+
+    # Qdrant client timeout in seconds
+    QDRANT_TIMEOUT: float = 30.0
+
     class Config:
         env_file = ".env"
 

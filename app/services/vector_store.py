@@ -24,9 +24,13 @@ def get_client() -> QdrantClient:
     global _client
     if _client is None:
         if settings.QDRANT_HOST == ":memory:":
-            _client = QdrantClient(":memory:")
+            _client = QdrantClient(":memory:", timeout=settings.QDRANT_TIMEOUT)
         else:
-            _client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+            _client = QdrantClient(
+                host=settings.QDRANT_HOST,
+                port=settings.QDRANT_PORT,
+                timeout=settings.QDRANT_TIMEOUT,
+            )
     return _client
 
 

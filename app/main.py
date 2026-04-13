@@ -23,13 +23,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal, engine
 from app.models import Base, File, FileStatus
 from app.routers import courses, files, retrieve, ui
-from app.services.vector_store import delete_by_file_id, ensure_collection
+from app.services.vector_store import delete_by_file_id, ensure_collection, get_client
 from app.tasks.ingest_task import ingest_task
 
 
@@ -104,6 +106,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(files.router)
 app.include_router(retrieve.router)
 app.include_router(courses.router)
@@ -112,4 +122,18 @@ app.include_router(ui.router)
 
 @app.get("/health", tags=["health"])
 def health() -> dict:
+    # Check Postgres
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+    except Exception as e:
+        return {"status": "unhealthy", "detail": f"Database: {str(e)}"}
+
+    # Check Qdrant
+    try:
+        get_client().get_collections()
+    except Exception as e:
+        return {"status": "unhealthy", "detail": f"Qdrant: {str(e)}"}
+
     return {"status": "ok"}

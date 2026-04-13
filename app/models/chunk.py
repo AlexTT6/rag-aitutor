@@ -15,6 +15,7 @@ class Chunk(Base):
         GUID(),
         ForeignKey("files.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     # course_id is denormalized here to avoid a join during retrieval result hydration.
     course_id = Column(GUID(), nullable=False, index=True)
