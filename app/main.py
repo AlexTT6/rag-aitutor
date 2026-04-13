@@ -153,15 +153,11 @@ def config_check() -> dict:
     }
 
 
-@app.post("/debug-search", tags=["debug"])
-def debug_search(body: dict) -> dict:
+@app.get("/debug-search", tags=["debug"])
+def debug_search(query: str, course_id: str) -> dict:
     """Returns raw scores without threshold filtering. Remove before production."""
     from app.services.embedder import embed_query
     from app.services.vector_store import search_chunks
-    query = body.get("query", "")
-    course_id = body.get("course_id", "")
-    if not query or not course_id:
-        return {"error": "query and course_id required"}
     vector = embed_query(query)
     hits = search_chunks(vector, course_id, top_k=5)
     return {
