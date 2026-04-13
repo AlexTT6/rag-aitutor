@@ -153,6 +153,26 @@ def config_check() -> dict:
     }
 
 
+@app.post("/debug-search", tags=["debug"])
+def debug_search(body: dict) -> dict:
+    """Returns raw scores without threshold filtering. Remove before production."""
+    from app.services.embedder import embed_query
+    from app.services.vector_store import search_chunks
+    query = body.get("query", "")
+    course_id = body.get("course_id", "")
+    if not query or not course_id:
+        return {"error": "query and course_id required"}
+    vector = embed_query(query)
+    hits = search_chunks(vector, course_id, top_k=5)
+    return {
+        "threshold": settings.RETRIEVAL_SCORE_THRESHOLD,
+        "results": [
+            {"score": round(h.score, 4), "text_preview": (h.payload or {}).get("text", "")[:100]}
+            for h in hits
+        ],
+    }
+
+
 @app.get("/health", tags=["health"])
 def health() -> dict:
     # Check Postgres
