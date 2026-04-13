@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     TOP_K_DEFAULT: int = 5
     TOP_K_MAX: int = 20
 
-    RETRIEVAL_SCORE_THRESHOLD: float = 0.35
+    RETRIEVAL_SCORE_THRESHOLD: float = 0.70
     MIN_EXTRACTABLE_RATIO: float = 0.50
 
     # CORS — comma-separated list of allowed origins for the React frontend

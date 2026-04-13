@@ -38,6 +38,21 @@ def ensure_collection(vector_size: int) -> None:
     client = get_client()
     existing_names = [c.name for c in client.get_collections().collections]
 
+    if settings.QDRANT_COLLECTION in existing_names:
+        # Check dimension matches — if not, drop and recreate.
+        # This happens when switching from local (384) to OpenAI (1536) embeddings.
+        info = client.get_collection(settings.QDRANT_COLLECTION)
+        existing_size = info.config.params.vectors.size
+        if existing_size != vector_size:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[vector_store] collection dimension mismatch "
+                f"(existing={existing_size}, required={vector_size}) — "
+                f"dropping and recreating collection"
+            )
+            client.delete_collection(settings.QDRANT_COLLECTION)
+            existing_names = []
+
     if settings.QDRANT_COLLECTION not in existing_names:
         try:
             client.create_collection(
@@ -45,8 +60,6 @@ def ensure_collection(vector_size: int) -> None:
                 vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
             )
         except Exception:
-            # Another startup call may have won the race and already created
-            # the collection. Re-check before propagating the error.
             existing_names = [c.name for c in client.get_collections().collections]
             if settings.QDRANT_COLLECTION not in existing_names:
                 raise
