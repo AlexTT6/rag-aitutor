@@ -22,8 +22,8 @@ from app.services.extractor import PageContent
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
-CHUNK_SIZE = 400    # tokens per chunk
-OVERLAP = 50        # tokens shared between adjacent chunks
+CHUNK_SIZE = 200    # tokens per chunk — must stay under model's 256-token limit
+OVERLAP = 30        # tokens shared between adjacent chunks
 MIN_CHARS = 50      # shorter chunks are page artifacts — skip them
 
 
