@@ -132,6 +132,16 @@ app.include_router(courses.router)
 app.include_router(ui.router)
 
 
+@app.get("/config-check", tags=["debug"])
+def config_check() -> dict:
+    return {
+        "embedding_provider": settings.EMBEDDING_PROVIDER,
+        "embedding_dim": settings.EMBEDDING_DIM,
+        "threshold": settings.RETRIEVAL_SCORE_THRESHOLD,
+        "openai_key_set": bool(settings.OPENAI_API_KEY),
+    }
+
+
 @app.get("/health", tags=["health"])
 def health() -> dict:
     # Check Postgres
