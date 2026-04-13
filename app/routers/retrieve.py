@@ -12,6 +12,41 @@ from app.services.vector_store import search_chunks
 router = APIRouter(tags=["retrieve"])
 logger = logging.getLogger(__name__)
 
+# Dynamic retrieval: if top_k results are all below threshold,
+# retry with a larger top_k before giving up.
+_TOP_K_LADDER = [5, 10, 15]
+
+
+def _search_with_fallback(
+    query_vector: list,
+    course_id: str,
+    requested_top_k: int,
+) -> tuple[list, bool]:
+    """
+    Tries top_k values in _TOP_K_LADDER (starting from requested_top_k).
+    Returns (hits, all_low_confidence).
+    Stops as soon as at least one result is above threshold.
+    """
+    ladder = sorted(set([requested_top_k] + _TOP_K_LADDER))
+
+    for k in ladder:
+        hits = search_chunks(query_vector, course_id, top_k=k)
+        if not hits:
+            continue
+
+        best = max(h.score for h in hits)
+        if best >= settings.RETRIEVAL_SCORE_THRESHOLD:
+            logger.info(f"[retrieve] found confident results at top_k={k} best={best:.3f}")
+            return hits, False
+
+        logger.info(
+            f"[retrieve] top_k={k} best_score={best:.3f} < "
+            f"{settings.RETRIEVAL_SCORE_THRESHOLD} — trying larger top_k"
+        )
+
+    # All ladder steps exhausted — still low confidence
+    return hits if hits else [], True
+
 
 @router.post("/retrieve", response_model=RetrieveResponse)
 def retrieve(
@@ -28,77 +63,60 @@ def retrieve(
             detail=f"top_k cannot exceed {settings.TOP_K_MAX}.",
         )
 
-    # Embed the query
     query_vector = embed_query(req.query)
     if not query_vector:
         raise HTTPException(status_code=500, detail="Embedding failed.")
 
-    hits = search_chunks(query_vector, str(req.course_id), top_k=top_k)
+    hits, all_low = _search_with_fallback(query_vector, str(req.course_id), top_k)
 
-    if not hits:
-        logger.info(f"[retrieve] no results query='{req.query[:60]}' course={req.course_id}")
-        return RetrieveResponse(results=[])
-
-    # If ALL results are below the confidence threshold — return empty.
-    # Sending low-quality chunks to the LLM causes hallucinations.
-    best_score = max(h.score for h in hits)
-    if best_score < settings.RETRIEVAL_SCORE_THRESHOLD:
+    if not hits or all_low:
         logger.info(
-            f"[retrieve] all scores below threshold ({best_score:.3f} < "
-            f"{settings.RETRIEVAL_SCORE_THRESHOLD}) — returning empty "
+            f"[retrieve] returning empty — all scores below threshold "
             f"query='{req.query[:60]}'"
         )
         return RetrieveResponse(results=[])
 
-    # Build results directly from Qdrant payload — no Postgres JOIN needed.
-    # filename, text, page are stored in the payload at index time.
-    # Fall back to Postgres only for chunks indexed before this change
-    # (they won't have filename in payload).
+    # Build results from Qdrant payload — no Postgres JOIN needed.
+    # Chunks indexed before the payload migration fall back to Postgres.
     results: list[ChunkResult] = []
     missing_from_payload: list[str] = []
 
     for hit in hits:
-        score = hit.score
-        if score < settings.RETRIEVAL_SCORE_THRESHOLD:
-            continue  # skip individual low-confidence results
+        if hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
+            continue
 
         payload = hit.payload or {}
         text = payload.get("text", "")
-        filename = payload.get("filename", "")
-        page = payload.get("page", 0)
-        file_id = payload.get("file_id", "")
-        course_id = payload.get("course_id", str(req.course_id))
 
         if not text:
-            # Old vector without text in payload — need DB fallback
             missing_from_payload.append(str(hit.id))
             continue
 
         results.append(
             ChunkResult(
                 chunk_id=str(hit.id),
-                file_id=file_id,
-                filename=filename,
-                course_id=course_id,
-                page=page,
+                file_id=payload.get("file_id", ""),
+                filename=payload.get("filename", ""),
+                course_id=payload.get("course_id", str(req.course_id)),
+                page=payload.get("page", 0),
                 text=text,
-                score=round(score, 4),
-                low_confidence=False,  # already filtered above
+                score=round(hit.score, 4),
+                low_confidence=False,
             )
         )
 
-    # Fallback for old vectors without payload text (backwards compatibility)
+    # Postgres fallback for old vectors without payload text
     if missing_from_payload:
         from sqlalchemy.orm import joinedload
         from app.models.chunk import Chunk
 
+        score_map = {str(h.id): h.score for h in hits}
         db_chunks = (
             db.query(Chunk)
             .options(joinedload(Chunk.file))
             .filter(Chunk.qdrant_id.in_(missing_from_payload))
             .all()
         )
-        score_map = {str(h.id): h.score for h in hits}
         for chunk in db_chunks:
             score = score_map.get(chunk.qdrant_id, 0.0)
             if score < settings.RETRIEVAL_SCORE_THRESHOLD:
@@ -116,12 +134,13 @@ def retrieve(
                 )
             )
 
-    # Keep original Qdrant ranking order
-    qdrant_order = {str(h.id): i for i, h in enumerate(hits)}
-    results.sort(key=lambda r: qdrant_order.get(r.chunk_id, 999))
+    # Preserve Qdrant ranking order
+    order = {str(h.id): i for i, h in enumerate(hits)}
+    results.sort(key=lambda r: order.get(r.chunk_id, 999))
 
     logger.info(
-        f"[retrieve] returned {len(results)} chunks "
-        f"best_score={best_score:.3f} query='{req.query[:60]}'"
+        f"[retrieve] {len(results)} results "
+        f"best={max((r.score for r in results), default=0):.3f} "
+        f"query='{req.query[:60]}'"
     )
     return RetrieveResponse(results=results)
