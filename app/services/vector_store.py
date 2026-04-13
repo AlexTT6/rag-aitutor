@@ -72,6 +72,7 @@ def insert_chunks(
             f"got {len(chunks)} chunks and {len(embeddings)} embeddings."
         )
 
+    ensure_collection(len(embeddings[0]))
     client = get_client()
     points: list[PointStruct] = []
     qdrant_ids: list[str] = []
@@ -110,6 +111,9 @@ def search_chunks(
     top_k: int,
 ) -> list:
     client = get_client()
+    existing_names = [c.name for c in client.get_collections().collections]
+    if settings.QDRANT_COLLECTION not in existing_names:
+        return []
     result = client.query_points(
         collection_name=settings.QDRANT_COLLECTION,
         query=query_vector,
