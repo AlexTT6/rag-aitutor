@@ -1,34 +1,58 @@
-# ARCHITECTURE NOTE:
-# FastAPI BackgroundTasks is used here for MVP simplicity.
-# It requires no additional infrastructure but has real limitations:
-#   - Runs in the same process as the web server. A slow ingestion job
-#     (large PDF, slow embedding API) ties up a Uvicorn worker thread.
-#   - No retry logic, no queue visibility, no task state beyond what we
-#     write to the database ourselves.
-#   - A process crash loses any queued tasks that have not started yet.
-#     The startup recovery in main.py mitigates this by re-queuing files
-#     stuck in "processing" status, but it cannot recover tasks that were
-#     queued but never started.
-#   - Does not scale horizontally without coordination across workers.
-#
-# Migration path when ready:
-#   Replace the background_tasks.add_task(ingest_task, file_id) call in
-#   routers/files.py with an enqueue call to Celery + Redis or ARQ.
-#   This function's signature stays identical — no other changes needed.
+import concurrent.futures
+import logging
 
 from app.database import SessionLocal
+from app.models.file import File, FileStatus
 from app.services.ingestion import run_ingestion
+
+logger = logging.getLogger(__name__)
+
+# Max seconds any ingestion job is allowed to run before being killed
+INGESTION_TIMEOUT_SECONDS = 120
+
+
+def _run_with_own_session(file_id: str) -> None:
+    """Runs ingestion in its own DB session — safe to execute in a thread."""
+    db = SessionLocal()
+    try:
+        run_ingestion(file_id, db)
+    finally:
+        db.close()
+
+
+def _mark_failed(file_id: str, message: str) -> None:
+    """Opens a fresh session and marks the file as failed."""
+    db = SessionLocal()
+    try:
+        file = db.query(File).filter(File.id == file_id).first()
+        if file:
+            file.status = FileStatus.failed
+            file.error_message = message[:500]
+            db.commit()
+    except Exception as e:
+        logger.error(f"Could not mark file {file_id} as failed: {e}")
+    finally:
+        db.close()
 
 
 def ingest_task(file_id: str) -> None:
     """
     Entry point for FastAPI BackgroundTasks.
 
-    Opens its own DB session. Never reuses the request-scoped session
-    from the upload endpoint — that session is closed before this task runs.
+    Runs ingestion in a ThreadPoolExecutor with a hard timeout.
+    If processing exceeds INGESTION_TIMEOUT_SECONDS the file is marked failed.
     """
-    db = SessionLocal()
-    try:
-        run_ingestion(file_id, db)
-    finally:
-        db.close()
+    logger.info(f"[ingest_task] START file_id={file_id}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run_with_own_session, file_id)
+        try:
+            future.result(timeout=INGESTION_TIMEOUT_SECONDS)
+            logger.info(f"[ingest_task] DONE  file_id={file_id}")
+        except concurrent.futures.TimeoutError:
+            msg = f"Processing timed out after {INGESTION_TIMEOUT_SECONDS} seconds."
+            logger.error(f"[ingest_task] TIMEOUT file_id={file_id} — {msg}")
+            _mark_failed(file_id, msg)
+        except Exception as e:
+            logger.exception(f"[ingest_task] FAILED file_id={file_id}: {e}")
+            _mark_failed(file_id, str(e))

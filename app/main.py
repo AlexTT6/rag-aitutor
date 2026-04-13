@@ -19,6 +19,8 @@
 # via the API and are cleaned up by the startup recovery job if the process
 # crashes mid-ingestion.
 
+import logging
+import logging.config
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +28,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.database import SessionLocal, engine

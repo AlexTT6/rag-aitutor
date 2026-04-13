@@ -1,8 +1,11 @@
+import logging
 import os
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.database import get_db
@@ -67,6 +70,13 @@ async def upload_file(
 
     with open(dest_path, "wb") as f:
         f.write(contents)
+
+    logger.info(
+        f"[upload] saved file_id={file_id} "
+        f"filename={file.filename} "
+        f"size_bytes={len(contents)} "
+        f"course_id={course_id}"
+    )
 
     db_file = FileModel(
         id=file_id,
