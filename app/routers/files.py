@@ -2,8 +2,10 @@ import logging
 import os
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
+
+from app.tasks.executor import active_job_count, submit_ingest, MAX_CONCURRENT_JOBS
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +15,6 @@ from app.models.course import Course
 from app.models.file import File as FileModel, FileStatus
 from app.schemas.file import FileDeleteResponse, FileStatusResponse, FileUploadResponse
 from app.services.vector_store import delete_by_file_id
-from app.tasks.ingest_task import ingest_task
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -22,7 +23,6 @@ _MAX_SIZE_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
 @router.post("/upload", response_model=FileUploadResponse, status_code=202)
 async def upload_file(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     course_id: str = Form(...),
     db: Session = Depends(get_db),
@@ -89,9 +89,19 @@ async def upload_file(
     db.add(db_file)
     db.commit()
 
-    # Pass only the file_id string — never the db session or ORM object.
-    # The task opens its own session (see tasks/ingest_task.py).
-    background_tasks.add_task(ingest_task, file_id)
+    # Submit to bounded thread pool — rejects if already at MAX_CONCURRENT_JOBS.
+    if not submit_ingest(file_id):
+        # Clean up the file we just saved since we can't process it now.
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        db.delete(db_file)
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server is busy processing other files ({MAX_CONCURRENT_JOBS} max). Try again in a moment.",
+        )
 
     return FileUploadResponse(
         file_id=file_id,

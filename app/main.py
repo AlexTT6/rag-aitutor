@@ -41,7 +41,7 @@ from app.database import SessionLocal, engine
 from app.models import Base, File, FileStatus
 from app.routers import courses, files, retrieve, ui
 from app.services.vector_store import delete_by_file_id, ensure_collection, get_client
-from app.tasks.ingest_task import ingest_task
+from app.tasks.executor import shutdown as shutdown_executor, submit_ingest
 
 
 def _recover_stuck_files(db: Session) -> list[str]:
@@ -96,12 +96,15 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # Re-queue outside the DB session — ingest_task opens its own session.
-    import threading
+    # Re-queue via executor — same bounded pool, respects MAX_CONCURRENT_JOBS.
     for file_id in to_requeue:
-        threading.Thread(target=ingest_task, args=(file_id,), daemon=True).start()
+        submit_ingest(file_id)
+        logger.info(f"[startup] re-queued file_id={file_id}")
 
     yield
+
+    shutdown_executor()
+    logger.info("[shutdown] ingestion executor stopped")
 
 
 app = FastAPI(

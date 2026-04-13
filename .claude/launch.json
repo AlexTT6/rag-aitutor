@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Docker Compose (full stack)",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["/tmp/rag_start.sh"],
+      "port": 8000
+    }
+  ]
+}

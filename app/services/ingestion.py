@@ -91,6 +91,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
             course_id=str(file.course_id),
             chunks=chunks,
             embeddings=embeddings,
+            filename=file.filename or "",
         )
         qdrant_vectors_written = True
         logger.info(f"[ingestion] Qdrant done file_id={file_id} vectors={len(qdrant_ids)}")

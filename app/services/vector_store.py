@@ -69,6 +69,7 @@ def insert_chunks(
     course_id: str,
     chunks: list[Chunk],
     embeddings: list[list[float]],
+    filename: str = "",
 ) -> list[str]:
     if len(chunks) != len(embeddings):
         raise ValueError(
@@ -92,6 +93,7 @@ def insert_chunks(
                     "chunk_id": qid,
                     "file_id": file_id,
                     "course_id": course_id,
+                    "filename": filename,
                     "page": chunk.page,
                     "chunk_index": chunk.chunk_index,
                     "text": chunk.text,
