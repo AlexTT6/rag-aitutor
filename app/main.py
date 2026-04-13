@@ -74,6 +74,11 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_collection(vector_size=settings.EMBEDDING_DIM)
 
+    # Pre-load embedding model so the first upload is not slow
+    if settings.EMBEDDING_PROVIDER == "local":
+        from app.services.embedder import _get_local_model
+        _get_local_model()
+
     db = SessionLocal()
     try:
         to_requeue = _recover_stuck_files(db)
