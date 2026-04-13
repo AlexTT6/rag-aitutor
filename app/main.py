@@ -134,11 +134,22 @@ app.include_router(ui.router)
 
 @app.get("/config-check", tags=["debug"])
 def config_check() -> dict:
+    from app.services.vector_store import get_client
+    client = get_client()
+    try:
+        info = client.get_collection(settings.QDRANT_COLLECTION)
+        vector_count = info.points_count
+        vector_dim = info.config.params.vectors.size
+    except Exception as e:
+        vector_count = f"error: {e}"
+        vector_dim = "unknown"
     return {
         "embedding_provider": settings.EMBEDDING_PROVIDER,
         "embedding_dim": settings.EMBEDDING_DIM,
         "threshold": settings.RETRIEVAL_SCORE_THRESHOLD,
         "openai_key_set": bool(settings.OPENAI_API_KEY),
+        "qdrant_vector_count": vector_count,
+        "qdrant_vector_dim": vector_dim,
     }
 
 
