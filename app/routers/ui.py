@@ -498,7 +498,8 @@ async function uploadFile() {
 
   try {
     const r = await fetch(API + '/files/upload', { method: 'POST', body: fd });
-    const data = await r.json();
+    let data;
+    try { data = await r.json(); } catch { throw new Error(`Server error ${r.status} — try again in a moment.`); }
     if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
 
     fileId = data.file_id;
