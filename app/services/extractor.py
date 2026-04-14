@@ -32,10 +32,10 @@ OCR_MIN_CHARS = 50
 OCR_MIN_ALPHA_RATIO = 0.40
 # Pages with images AND fewer than this many chars also get OCR (catches theorem boxes)
 OCR_IMAGE_PAGE_THRESHOLD = 300
-# Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps image small
-OCR_DPI = 120
+# Render resolution — 96 DPI keeps image small = faster API call, quality fine for text
+OCR_DPI = 96
 # Max parallel OCR requests to OpenAI
-OCR_MAX_WORKERS = 8
+OCR_MAX_WORKERS = 16
 
 
 def _is_good_text(text: str) -> bool:
