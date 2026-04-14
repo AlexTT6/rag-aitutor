@@ -23,6 +23,7 @@ class FileStatusResponse(BaseModel):
     error_message: Optional[str]
     uploaded_at: datetime
     indexed_at: Optional[datetime]
+    file_exists: bool = True   # False when the PDF was lost from disk (e.g. after redeploy)
 
     model_config = {"from_attributes": True}
 
@@ -30,6 +31,7 @@ class FileStatusResponse(BaseModel):
     # We handle this with a validator below.
     @classmethod
     def from_orm_file(cls, f) -> "FileStatusResponse":
+        import os
         return cls(
             file_id=f.id,
             course_id=f.course_id,
@@ -41,6 +43,7 @@ class FileStatusResponse(BaseModel):
             error_message=f.error_message,
             uploaded_at=f.uploaded_at,
             indexed_at=f.indexed_at,
+            file_exists=os.path.exists(f.storage_path),
         )
 
 

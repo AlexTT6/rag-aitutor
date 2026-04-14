@@ -96,6 +96,15 @@ def _recover_stuck_files(db: Session) -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- Storage path persistence check ---
+    import os as _os
+    if not _os.path.isabs(settings.STORAGE_PATH):
+        logger.warning(
+            f"[startup] STORAGE_PATH={settings.STORAGE_PATH!r} is a relative path — "
+            f"uploaded PDFs will be lost on every redeploy. "
+            f"Mount a Railway Volume and set STORAGE_PATH=/data/storage to persist files."
+        )
+
     # --- DB schema ---
     try:
         Base.metadata.create_all(bind=engine)

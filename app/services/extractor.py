@@ -34,6 +34,8 @@ OCR_MIN_ALPHA_RATIO = 0.40
 OCR_IMAGE_PAGE_THRESHOLD = 300
 # Render resolution — 96 DPI keeps image small = faster API call, quality fine for text
 OCR_DPI = 96
+# Hard pages (image-heavy, near-zero native text) get 2× resolution + detail=high
+OCR_HARD_DPI = 192
 # Max parallel OCR requests to OpenAI
 OCR_MAX_WORKERS = 16
 
@@ -69,11 +71,11 @@ class ExtractionResult:
     ocr_page_count: int = 0
 
 
-def _render_page_b64(fitz_page: fitz.Page) -> str:
+def _render_page_b64(fitz_page: fitz.Page, dpi: int = OCR_DPI) -> str:
     """Renders a PDF page to a base64-encoded JPEG string.
     JPEG at 85% quality is ~10x smaller than PNG — faster API calls, same OCR accuracy.
     """
-    mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
     pix = fitz_page.get_pixmap(matrix=mat)
     return base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode("utf-8")
 
@@ -112,11 +114,12 @@ def clear_ocr_cache_page(cache_path: str, page_num: int) -> bool:
     return True
 
 
-def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
+def _ocr_one(page_num: int, b64_image: str, detail: str = "auto") -> Tuple[int, str]:
     """
     Sends a pre-rendered page image to OpenAI Vision.
     Returns (page_num, extracted_text).
     Runs in a thread — fitz_page must NOT be passed here (not thread-safe).
+    detail="high" is used for hard pages (image-heavy, near-zero native text).
     """
     if not settings.OPENAI_API_KEY:
         logger.warning(f"[extractor] OCR skipped page {page_num} — no OPENAI_API_KEY")
@@ -129,7 +132,7 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
         logger.info(
             f"[extractor] OCR_REQUEST page={page_num} "
             f"image_b64_len={len(b64_image)} "
-            f"model=gpt-4o-mini detail=auto max_tokens=1500"
+            f"model=gpt-4o-mini detail={detail!r} max_tokens=1500"
         )
 
         response = client.chat.completions.create(
@@ -152,7 +155,7 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/jpeg;base64,{b64_image}",
-                                "detail": "auto",
+                                "detail": detail,
                             },
                         },
                     ],
@@ -208,8 +211,8 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
 
     # page_num → native text (may be "")
     native: Dict[int, str] = {}
-    # page_num → base64 JPEG  (only for image-only pages not in cache)
-    to_ocr: Dict[int, str] = {}
+    # page_num → (base64 JPEG, detail level) — only for image-only pages not in cache
+    to_ocr: Dict[int, Tuple[str, str]] = {}
 
     if not ocr_enabled:
         # OCR disabled — extract native text only, no rendering, no API calls
@@ -243,15 +246,25 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
                     else:
                         # Stale empty cache entry — treat as uncached and re-queue
                         logger.warning(f"[extractor] OCR_CACHE_EMPTY page={i} — cached value is empty, re-queuing for OCR")
-                        to_ocr[i] = _render_page_b64(fitz_page)
+                        _is_hard = has_images and len(text) < OCR_MIN_CHARS
+                        to_ocr[i] = (
+                            _render_page_b64(fitz_page, dpi=OCR_HARD_DPI if _is_hard else OCR_DPI),
+                            "high" if _is_hard else "auto",
+                        )
                 else:
+                    is_hard = has_images and len(text) < OCR_MIN_CHARS
+                    dpi = OCR_HARD_DPI if is_hard else OCR_DPI
+                    ocr_detail = "high" if is_hard else "auto"
                     reason = (
                         "too short" if len(text) < OCR_MIN_CHARS
                         else "garbage text" if not _is_good_text(text)
                         else f"has images + only {len(text)} chars"
                     )
-                    logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
-                    to_ocr[i] = _render_page_b64(fitz_page)
+                    logger.info(
+                        f"[extractor] page {i} → {reason}, queuing for OCR "
+                        f"[dpi={dpi} detail={ocr_detail!r}]"
+                    )
+                    to_ocr[i] = (_render_page_b64(fitz_page, dpi=dpi), ocr_detail)
 
         doc.close()
 
@@ -264,8 +277,8 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
             logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
             with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as pool:
                 futures = {
-                    pool.submit(_ocr_one, page_num, b64): page_num
-                    for page_num, b64 in to_ocr.items()
+                    pool.submit(_ocr_one, page_num, b64, detail): page_num
+                    for page_num, (b64, detail) in to_ocr.items()
                 }
                 for future in as_completed(futures):
                     page_num, text = future.result()
