@@ -138,6 +138,7 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
                 }
             ],
             max_tokens=1500,
+            timeout=settings.OCR_TIMEOUT,
         )
         text = response.choices[0].message.content or ""
         # Detect GPT refusal responses (model sometimes refuses image-only pages)
@@ -153,7 +154,7 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
         return page_num, ""
 
 
-def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None) -> ExtractionResult:
+def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabled: bool = True) -> ExtractionResult:
     """
     Extracts text from every PDF page.
 
@@ -172,62 +173,71 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None) -> Extrac
     doc = fitz.open(pdf_path)
     total = len(doc)
 
-    # Load existing OCR cache (empty dict if first time)
-    ocr_cache: Dict[int, str] = _load_ocr_cache(ocr_cache_path) if ocr_cache_path else {}
-    cache_hits = 0
-
     # page_num → native text (may be "")
     native: Dict[int, str] = {}
     # page_num → base64 JPEG  (only for image-only pages not in cache)
     to_ocr: Dict[int, str] = {}
 
-    # --- Pass 1: extract text + render bad pages (must be single-threaded) ---
-    for i, fitz_page in enumerate(doc, start=1):
-        text = fitz_page.get_text("text").strip()
-        native[i] = text
-        has_images = len(fitz_page.get_images()) > 0
+    if not ocr_enabled:
+        # OCR disabled — extract native text only, no rendering, no API calls
+        logger.info("[extractor] OCR disabled — native text only")
+        for i, fitz_page in enumerate(doc, start=1):
+            native[i] = fitz_page.get_text("text").strip()
+        doc.close()
+        ocr_cache: Dict[int, str] = {}
+        ocr_results: Dict[int, str] = {}
+    else:
+        # Load existing OCR cache (empty dict if first time)
+        ocr_cache = _load_ocr_cache(ocr_cache_path) if ocr_cache_path else {}
+        cache_hits = 0
 
-        needs_ocr = (
-            not _is_good_text(text)                                     # too short or garbage
-            or (has_images and len(text) < OCR_IMAGE_PAGE_THRESHOLD)    # has image boxes + little text
-        )
-        if needs_ocr:
-            if i in ocr_cache:
-                # Cache hit — skip rendering and API call entirely
-                cache_hits += 1
-                logger.debug(f"[extractor] page {i} → OCR cache hit")
-            else:
-                reason = (
-                    "too short" if len(text) < OCR_MIN_CHARS
-                    else "garbage text" if not _is_good_text(text)
-                    else f"has images + only {len(text)} chars"
-                )
-                logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
-                to_ocr[i] = _render_page_b64(fitz_page)
+        # --- Pass 1: extract text + render bad pages (must be single-threaded) ---
+        for i, fitz_page in enumerate(doc, start=1):
+            text = fitz_page.get_text("text").strip()
+            native[i] = text
+            has_images = len(fitz_page.get_images()) > 0
 
-    doc.close()
+            needs_ocr = (
+                not _is_good_text(text)                                     # too short or garbage
+                or (has_images and len(text) < OCR_IMAGE_PAGE_THRESHOLD)    # has image boxes + little text
+            )
+            if needs_ocr:
+                if i in ocr_cache:
+                    # Cache hit — skip rendering and API call entirely
+                    cache_hits += 1
+                    logger.debug(f"[extractor] page {i} → OCR cache hit")
+                else:
+                    reason = (
+                        "too short" if len(text) < OCR_MIN_CHARS
+                        else "garbage text" if not _is_good_text(text)
+                        else f"has images + only {len(text)} chars"
+                    )
+                    logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
+                    to_ocr[i] = _render_page_b64(fitz_page)
 
-    if cache_hits:
-        logger.info(f"[extractor] {cache_hits} pages served from OCR cache (no API call)")
+        doc.close()
 
-    # --- Pass 2: OCR in parallel (only uncached pages) ---
-    ocr_results: Dict[int, str] = {}
-    if to_ocr:
-        logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
-        with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as pool:
-            futures = {
-                pool.submit(_ocr_one, page_num, b64): page_num
-                for page_num, b64 in to_ocr.items()
-            }
-            for future in as_completed(futures):
-                page_num, text = future.result()
-                ocr_results[page_num] = text
+        if cache_hits:
+            logger.info(f"[extractor] {cache_hits} pages served from OCR cache (no API call)")
 
-        # Persist new results to cache
-        if ocr_cache_path:
-            ocr_cache.update(ocr_results)
-            _save_ocr_cache(ocr_cache_path, ocr_cache)
-            logger.info(f"[extractor] OCR cache updated ({len(ocr_cache)} pages total)")
+        # --- Pass 2: OCR in parallel (only uncached pages) ---
+        ocr_results = {}
+        if to_ocr:
+            logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
+            with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as pool:
+                futures = {
+                    pool.submit(_ocr_one, page_num, b64): page_num
+                    for page_num, b64 in to_ocr.items()
+                }
+                for future in as_completed(futures):
+                    page_num, text = future.result()
+                    ocr_results[page_num] = text
+
+            # Persist new results to cache
+            if ocr_cache_path:
+                ocr_cache.update(ocr_results)
+                _save_ocr_cache(ocr_cache_path, ocr_cache)
+                logger.info(f"[extractor] OCR cache updated ({len(ocr_cache)} pages total)")
 
     # --- Assemble final page list in order ---
     pages: List[PageContent] = []
