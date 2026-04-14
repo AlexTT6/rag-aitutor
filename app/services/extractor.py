@@ -29,7 +29,7 @@ OCR_MIN_CHARS = 50
 # Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps PNG small
 OCR_DPI = 120
 # Max parallel OCR requests to OpenAI
-OCR_MAX_WORKERS = 5
+OCR_MAX_WORKERS = 8
 
 
 @dataclass
@@ -88,13 +88,13 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{b64_image}",
-                                "detail": "high",
+                                "detail": "low",
                             },
                         },
                     ],
                 }
             ],
-            max_tokens=2000,
+            max_tokens=1000,
         )
         text = response.choices[0].message.content or ""
         logger.info(f"[extractor] OCR page {page_num} → {len(text)} chars")
