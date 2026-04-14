@@ -5,14 +5,18 @@ Normal pages: text extracted directly via PyMuPDF (fast, free).
 Image-only pages: rendered as PNG → sent to OpenAI gpt-4o-mini Vision
                   to extract text and math formulas.
 
+OCR calls run in parallel (up to OCR_MAX_WORKERS at once) so a PDF
+with 10 image pages takes ~the same time as 1 image page.
+
 A page is considered "image-only" when PyMuPDF extracts fewer than
 OCR_MIN_CHARS characters from it (default: 50).
 """
 
 import base64
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Tuple
 
 import fitz  # PyMuPDF
 
@@ -22,43 +26,47 @@ logger = logging.getLogger(__name__)
 
 # Pages with fewer chars than this get sent to Vision OCR
 OCR_MIN_CHARS = 50
-# Render resolution for Vision — 150 DPI is enough for GPT-4o to read clearly
-OCR_DPI = 150
+# Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps PNG small
+OCR_DPI = 120
+# Max parallel OCR requests to OpenAI
+OCR_MAX_WORKERS = 5
 
 
 @dataclass
 class PageContent:
-    page: int   # 1-indexed, matches the PDF page number
+    page: int        # 1-indexed, matches the PDF page number
     text: str
-    ocr_used: bool = False  # True if Vision OCR was used for this page
+    ocr_used: bool = False
 
 
 @dataclass
 class ExtractionResult:
-    pages: List[PageContent]      # only pages that yielded text
-    total_page_count: int         # every page in the PDF, including blank/scanned
-    extractable_page_count: int   # pages that had at least some text
-    ocr_page_count: int = 0       # pages that needed Vision OCR
+    pages: List[PageContent]
+    total_page_count: int
+    extractable_page_count: int
+    ocr_page_count: int = 0
 
 
-def _ocr_page(fitz_page: fitz.Page, page_num: int) -> str:
+def _render_page_b64(fitz_page: fitz.Page) -> str:
+    """Renders a PDF page to a base64-encoded PNG string."""
+    mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
+    pix = fitz_page.get_pixmap(matrix=mat)
+    return base64.b64encode(pix.tobytes("png")).decode("utf-8")
+
+
+def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
     """
-    Renders the page as a PNG and sends it to OpenAI Vision.
-    Returns extracted text, or empty string on failure.
+    Sends a pre-rendered page image to OpenAI Vision.
+    Returns (page_num, extracted_text).
+    Runs in a thread — fitz_page must NOT be passed here (not thread-safe).
     """
     if not settings.OPENAI_API_KEY:
         logger.warning(f"[extractor] OCR skipped page {page_num} — no OPENAI_API_KEY")
-        return ""
+        return page_num, ""
 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
-
-        # Render page to PNG bytes
-        mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
-        pix = fitz_page.get_pixmap(matrix=mat)
-        png_bytes = pix.tobytes("png")
-        b64 = base64.b64encode(png_bytes).decode("utf-8")
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -79,7 +87,7 @@ def _ocr_page(fitz_page: fitz.Page, page_num: int) -> str:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{b64}",
+                                "url": f"data:image/png;base64,{b64_image}",
                                 "detail": "high",
                             },
                         },
@@ -90,44 +98,74 @@ def _ocr_page(fitz_page: fitz.Page, page_num: int) -> str:
         )
         text = response.choices[0].message.content or ""
         logger.info(f"[extractor] OCR page {page_num} → {len(text)} chars")
-        return text
+        return page_num, text
 
     except Exception as e:
         logger.error(f"[extractor] OCR failed page {page_num}: {e}")
-        return ""
+        return page_num, ""
 
 
 def extract_pages(pdf_path: str) -> ExtractionResult:
     """
-    Opens the PDF and extracts text page by page.
+    Extracts text from every PDF page.
 
-    - Pages with enough native text → extracted directly (fast).
-    - Pages with little/no text → rendered and sent to OpenAI Vision OCR.
-    - Pages that yield nothing from either method → skipped.
+    Pass 1 (main thread, sequential):
+      - Extract native text from all pages with PyMuPDF.
+      - Render image-only pages to PNG bytes (still in main thread — fitz is not thread-safe).
+
+    Pass 2 (parallel threads):
+      - Send all image-only pages to OpenAI Vision simultaneously.
+      - Up to OCR_MAX_WORKERS concurrent requests.
+
+    Result: same speed for text pages, ~OCR_MAX_WORKERS× faster for image pages.
     """
     doc = fitz.open(pdf_path)
     total = len(doc)
+
+    # page_num → native text (may be "")
+    native: Dict[int, str] = {}
+    # page_num → base64 PNG  (only for image-only pages)
+    to_ocr: Dict[int, str] = {}
+
+    # --- Pass 1: extract text + render image pages (must be single-threaded) ---
+    for i, fitz_page in enumerate(doc, start=1):
+        text = fitz_page.get_text("text").strip()
+        native[i] = text
+        if len(text) < OCR_MIN_CHARS:
+            logger.info(f"[extractor] page {i} → only {len(text)} chars, queuing for OCR")
+            to_ocr[i] = _render_page_b64(fitz_page)
+
+    doc.close()
+
+    # --- Pass 2: OCR in parallel ---
+    ocr_results: Dict[int, str] = {}
+    if to_ocr:
+        logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
+        with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_ocr_one, page_num, b64): page_num
+                for page_num, b64 in to_ocr.items()
+            }
+            for future in as_completed(futures):
+                page_num, text = future.result()
+                ocr_results[page_num] = text
+
+    # --- Assemble final page list in order ---
     pages: List[PageContent] = []
     ocr_count = 0
 
-    for i, fitz_page in enumerate(doc, start=1):
-        text = fitz_page.get_text("text").strip()
-
-        if len(text) >= OCR_MIN_CHARS:
-            # Normal text page
-            pages.append(PageContent(page=i, text=text, ocr_used=False))
-        else:
-            # Image-only page — try Vision OCR
-            logger.info(f"[extractor] page {i} has only {len(text)} chars → trying OCR")
-            ocr_text = _ocr_page(fitz_page, i)
-            if ocr_text.strip():
+    for i in range(1, total + 1):
+        if i in to_ocr:
+            ocr_text = ocr_results.get(i, "").strip()
+            if ocr_text:
                 pages.append(PageContent(page=i, text=ocr_text, ocr_used=True))
                 ocr_count += 1
-            elif text:
-                # Keep the little text we had rather than losing the page
-                pages.append(PageContent(page=i, text=text, ocr_used=False))
-
-    doc.close()
+            elif native[i]:
+                # OCR failed but we had a little native text — keep it
+                pages.append(PageContent(page=i, text=native[i], ocr_used=False))
+        else:
+            if native[i]:
+                pages.append(PageContent(page=i, text=native[i], ocr_used=False))
 
     return ExtractionResult(
         pages=pages,
