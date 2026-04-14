@@ -88,13 +88,13 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{b64_image}",
-                                "detail": "low",
+                                "detail": "auto",
                             },
                         },
                     ],
                 }
             ],
-            max_tokens=1000,
+            max_tokens=1500,
         )
         text = response.choices[0].message.content or ""
         logger.info(f"[extractor] OCR page {page_num} → {len(text)} chars")
