@@ -54,6 +54,18 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"ocr_enabled={settings.OCR_ENABLED} "
             f"elapsed={time.monotonic()-t0:.1f}s"
         )
+        _total_chars = sum(len(p.text) for p in extraction.pages)
+        _ocr_chars = sum(len(p.text) for p in extraction.pages if p.ocr_used)
+        logger.info(
+            f"[ingestion:debug] FILE filename={file.filename!r} "
+            f"total_pages={extraction.total_page_count}"
+        )
+        logger.info(
+            f"[ingestion:debug] EXTRACTION "
+            f"total_chars={_total_chars} "
+            f"ocr_used={'yes' if extraction.ocr_page_count > 0 else 'no'} "
+            f"ocr_chars={_ocr_chars}"
+        )
 
         if extraction.total_page_count > settings.MAX_PAGES:
             raise ValueError(
@@ -85,6 +97,20 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"chunks={len(chunks)} "
             f"elapsed={time.monotonic()-t0:.1f}s"
         )
+        _token_counts = [len(_tokenizer.encode(c.text)) for c in chunks]
+        _avg_tokens = sum(_token_counts) / len(_token_counts)
+        _sample_indices = [0, len(chunks) // 2, len(chunks) - 1]
+        logger.info(
+            f"[ingestion:debug] CHUNKING "
+            f"total_chunks={len(chunks)} "
+            f"avg_tokens={_avg_tokens:.0f}"
+        )
+        for _si in _sample_indices:
+            logger.info(
+                f"[ingestion:debug] CHUNK_SAMPLE idx={_si} "
+                f"tokens={_token_counts[_si]} "
+                f"text={chunks[_si].text[:200]!r}"
+            )
 
         # Phase: embed
         file.status = FileStatus.embedding
@@ -99,6 +125,12 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"[ingestion] embed done file_id={file_id} "
             f"chunks={len(embeddings)} "
             f"elapsed={time.monotonic()-t0:.1f}s"
+        )
+        logger.info(
+            f"[ingestion:debug] EMBEDDINGS "
+            f"count={len(embeddings)} "
+            f"model=text-embedding-3-small "
+            f"dim={len(embeddings[0]) if embeddings else 0}"
         )
 
         # Phase: write to Qdrant
@@ -115,6 +147,12 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"[ingestion] qdrant done file_id={file_id} "
             f"vectors={len(qdrant_ids)} "
             f"elapsed={time.monotonic()-t0:.1f}s"
+        )
+        logger.info(
+            f"[ingestion:debug] INDEXING "
+            f"collection={settings.QDRANT_COLLECTION} "
+            f"vectors_stored={len(qdrant_ids)} "
+            f"status=ok"
         )
 
         # Phase: write chunks to Postgres
