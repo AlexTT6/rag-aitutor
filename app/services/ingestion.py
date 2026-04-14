@@ -44,7 +44,8 @@ def run_ingestion(file_id: str, db: Session) -> None:
         logger.info(
             f"[ingestion] extracted file_id={file_id} "
             f"total_pages={extraction.total_page_count} "
-            f"extractable={extraction.extractable_page_count}"
+            f"extractable={extraction.extractable_page_count} "
+            f"ocr_pages={extraction.ocr_page_count}"
         )
 
         # Phase 3 — enforce page limit
@@ -54,16 +55,13 @@ def run_ingestion(file_id: str, db: Session) -> None:
                 f"maximum allowed is {settings.MAX_PAGES}."
             )
 
-        # Phase 4 — reject mostly-scanned PDFs
-        if extraction.total_page_count > 0:
-            ratio = extraction.extractable_page_count / extraction.total_page_count
-            if ratio < settings.MIN_EXTRACTABLE_RATIO:
-                raise ValueError(
-                    f"Only {extraction.extractable_page_count} of "
-                    f"{extraction.total_page_count} pages contain extractable text "
-                    f"({ratio:.0%}). PDF appears to be mostly scanned images. "
-                    f"Minimum required: {settings.MIN_EXTRACTABLE_RATIO:.0%}."
-                )
+        # Phase 4 — reject PDFs with no extractable content at all
+        # (OCR already ran on image pages, so this only fires if everything failed)
+        if extraction.extractable_page_count == 0:
+            raise ValueError(
+                "No text could be extracted from this PDF — "
+                "neither native text nor OCR produced any content."
+            )
 
         # Phase 5 — chunk text
         logger.info(f"[ingestion] chunking file_id={file_id}")
