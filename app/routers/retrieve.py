@@ -28,30 +28,20 @@ def retrieve(
             detail=f"top_k cannot exceed {settings.TOP_K_MAX}.",
         )
 
-    # --- Step 1: embed query ---
-    dense_vector = embed_query(req.query)
-    if not dense_vector:
+    # Step 1: embed query
+    query_vector = embed_query(req.query)
+    if not query_vector:
         raise HTTPException(status_code=500, detail="Embedding failed.")
 
-    # --- Step 2: hybrid search ---
-    sparse_vector = None
-    if settings.HYBRID_SEARCH:
-        try:
-            from app.services.sparse_embedder import get_sparse_embedding
-            sparse_vector = get_sparse_embedding(req.query)
-        except Exception as e:
-            logger.warning(f"[retrieve] sparse embedding failed, falling back to dense: {e}")
-
-    fetch_k = settings.RERANKER_FETCH_K if settings.RERANKER_ENABLED else top_k
-    fetch_k = max(fetch_k, top_k)
-
-    hits = search_chunks(dense_vector, str(req.course_id), fetch_k, sparse_vector)
+    # Step 2: fetch more candidates than needed (for reranker to pick from)
+    fetch_k = max(top_k, settings.RERANKER_FETCH_K) if settings.RERANKER_ENABLED else top_k
+    hits = search_chunks(query_vector, str(req.course_id), fetch_k)
 
     if not hits:
-        logger.info(f"[retrieve] no results for query='{req.query[:60]}'")
+        logger.info(f"[retrieve] no results query='{req.query[:60]}'")
         return RetrieveResponse(results=[])
 
-    # --- Step 3: rerank ---
+    # Step 3: rerank candidates with cross-encoder, return top_k
     if settings.RERANKER_ENABLED and len(hits) > top_k:
         try:
             from app.services.reranker import rerank
@@ -62,19 +52,16 @@ def retrieve(
     else:
         hits = hits[:top_k]
 
-    # --- Step 4: filter by threshold (for dense/RRF scores) and build results ---
+    # Step 4: build results, filter by threshold
     results: list[ChunkResult] = []
     missing_from_payload: list[str] = []
 
     for hit in hits:
-        # For hybrid RRF results the score is rank-based (0.001–0.1 range),
-        # so skip threshold filtering when hybrid search is active.
-        if not settings.HYBRID_SEARCH and hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
+        if hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
             continue
 
         payload = hit.payload or {}
         text = payload.get("text", "")
-
         if not text:
             missing_from_payload.append(str(hit.id))
             continue
@@ -106,7 +93,7 @@ def retrieve(
         )
         for chunk in db_chunks:
             score = score_map.get(chunk.qdrant_id, 0.0)
-            if not settings.HYBRID_SEARCH and score < settings.RETRIEVAL_SCORE_THRESHOLD:
+            if score < settings.RETRIEVAL_SCORE_THRESHOLD:
                 continue
             results.append(
                 ChunkResult(
@@ -122,13 +109,12 @@ def retrieve(
             )
 
     if not results:
-        logger.info(f"[retrieve] all results below threshold query='{req.query[:60]}'")
+        logger.info(f"[retrieve] all below threshold query='{req.query[:60]}'")
         return RetrieveResponse(results=[])
 
     logger.info(
         f"[retrieve] {len(results)} results "
-        f"best={max(r.score for r in results):.4f} "
-        f"hybrid={'yes' if sparse_vector else 'no'} "
+        f"best={max(r.score for r in results):.3f} "
         f"reranked={settings.RERANKER_ENABLED} "
         f"query='{req.query[:60]}'"
     )

@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     # Qdrant client timeout in seconds
     QDRANT_TIMEOUT: float = 30.0
 
-    HYBRID_SEARCH: bool = True
     RERANKER_ENABLED: bool = True
     RERANKER_FETCH_K: int = 20  # fetch this many candidates before reranking
 

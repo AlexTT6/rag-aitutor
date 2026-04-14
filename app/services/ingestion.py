@@ -10,7 +10,6 @@ from app.models.file import File, FileStatus
 from app.services.chunker import chunk_document
 from app.services.embedder import get_embeddings
 from app.services.extractor import extract_pages
-from app.services.sparse_embedder import get_sparse_embeddings
 from app.services.vector_store import delete_by_file_id, insert_chunks
 
 logger = logging.getLogger(__name__)
@@ -82,39 +81,15 @@ def run_ingestion(file_id: str, db: Session) -> None:
             )
         logger.info(f"[ingestion] chunked file_id={file_id} chunks={len(chunks)}")
 
-        # Phase 6 — embed chunks (dense + sparse in parallel)
+        # Phase 6 — embed chunks
         file.status = FileStatus.embedding
         db.commit()
         logger.info(f"[ingestion] embedding file_id={file_id} chunks={len(chunks)}")
-        texts = [c.text for c in chunks]
-
-        from concurrent.futures import ThreadPoolExecutor as _TPE
-        embeddings = None
-        sparse_embeddings = None
-
-        def _run_dense():
-            return get_embeddings(texts)
-
-        def _run_sparse():
-            if not settings.HYBRID_SEARCH:
-                return None
-            try:
-                result = get_sparse_embeddings(texts)
-                logger.info(f"[ingestion] sparse embeddings done file_id={file_id}")
-                return result
-            except Exception as sparse_err:
-                logger.warning(f"[ingestion] sparse embedding failed (continuing without): {sparse_err}")
-                return None
-
-        with _TPE(max_workers=2) as pool:
-            dense_future = pool.submit(_run_dense)
-            sparse_future = pool.submit(_run_sparse)
-            try:
-                embeddings = dense_future.result()
-            except Exception as embed_err:
-                raise ValueError(f"Embedding failed: {embed_err}") from embed_err
-            sparse_embeddings = sparse_future.result()
-
+        try:
+            texts = [c.text for c in chunks]
+            embeddings = get_embeddings(texts)
+        except Exception as embed_err:
+            raise ValueError(f"Embedding failed: {embed_err}") from embed_err
         logger.info(f"[ingestion] embedded file_id={file_id}")
 
         # Phase 7 — write to Qdrant
@@ -124,7 +99,6 @@ def run_ingestion(file_id: str, db: Session) -> None:
             course_id=str(file.course_id),
             chunks=chunks,
             embeddings=embeddings,
-            sparse_embeddings=sparse_embeddings,
             filename=file.filename or "",
         )
         qdrant_vectors_written = True
