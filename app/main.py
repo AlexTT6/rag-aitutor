@@ -129,6 +129,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[startup] sparse embedder pre-warm failed (non-fatal): {e}")
 
+    # --- Pre-warm reranker (downloads cross-encoder model ~80MB if not cached) ---
+    if settings.RERANKER_ENABLED:
+        try:
+            from app.services.reranker import _get_model
+            _get_model()
+            logger.info("[startup] reranker model ready")
+        except Exception as e:
+            logger.warning(f"[startup] reranker pre-warm failed (non-fatal): {e}")
+
     # --- Recover stuck files ---
     to_requeue: list[str] = []
     try:
