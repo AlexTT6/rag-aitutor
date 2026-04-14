@@ -13,10 +13,12 @@ OCR_MIN_CHARS characters from it (default: 50).
 """
 
 import base64
+import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 
@@ -76,6 +78,25 @@ def _render_page_b64(fitz_page: fitz.Page) -> str:
     return base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode("utf-8")
 
 
+def _load_ocr_cache(cache_path: str) -> Dict[int, str]:
+    """Loads cached OCR results from disk. Returns empty dict if not found."""
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return {int(k): v for k, v in raw.items()}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_ocr_cache(cache_path: str, cache: Dict[int, str]) -> None:
+    """Persists OCR cache to disk. Failures are logged but never crash ingestion."""
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in cache.items()}, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"[extractor] OCR cache write failed: {e}")
+
+
 def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
     """
     Sends a pre-rendered page image to OpenAI Vision.
@@ -132,26 +153,32 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
         return page_num, ""
 
 
-def extract_pages(pdf_path: str) -> ExtractionResult:
+def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None) -> ExtractionResult:
     """
     Extracts text from every PDF page.
 
     Pass 1 (main thread, sequential):
       - Extract native text from all pages with PyMuPDF.
-      - Render image-only pages to PNG bytes (still in main thread — fitz is not thread-safe).
+      - Render image-only pages to JPEG bytes (still in main thread — fitz is not thread-safe).
+      - Pages already in the OCR cache are skipped (no API call needed).
 
     Pass 2 (parallel threads):
-      - Send all image-only pages to OpenAI Vision simultaneously.
+      - Send all uncached image-only pages to OpenAI Vision simultaneously.
       - Up to OCR_MAX_WORKERS concurrent requests.
+      - Results are written back to the cache after all calls complete.
 
-    Result: same speed for text pages, ~OCR_MAX_WORKERS× faster for image pages.
+    Result: re-indexing the same file never calls OpenAI Vision again.
     """
     doc = fitz.open(pdf_path)
     total = len(doc)
 
+    # Load existing OCR cache (empty dict if first time)
+    ocr_cache: Dict[int, str] = _load_ocr_cache(ocr_cache_path) if ocr_cache_path else {}
+    cache_hits = 0
+
     # page_num → native text (may be "")
     native: Dict[int, str] = {}
-    # page_num → base64 PNG  (only for image-only pages)
+    # page_num → base64 JPEG  (only for image-only pages not in cache)
     to_ocr: Dict[int, str] = {}
 
     # --- Pass 1: extract text + render bad pages (must be single-threaded) ---
@@ -165,17 +192,25 @@ def extract_pages(pdf_path: str) -> ExtractionResult:
             or (has_images and len(text) < OCR_IMAGE_PAGE_THRESHOLD)    # has image boxes + little text
         )
         if needs_ocr:
-            reason = (
-                "too short" if len(text) < OCR_MIN_CHARS
-                else "garbage text" if not _is_good_text(text)
-                else f"has images + only {len(text)} chars"
-            )
-            logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
-            to_ocr[i] = _render_page_b64(fitz_page)
+            if i in ocr_cache:
+                # Cache hit — skip rendering and API call entirely
+                cache_hits += 1
+                logger.debug(f"[extractor] page {i} → OCR cache hit")
+            else:
+                reason = (
+                    "too short" if len(text) < OCR_MIN_CHARS
+                    else "garbage text" if not _is_good_text(text)
+                    else f"has images + only {len(text)} chars"
+                )
+                logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
+                to_ocr[i] = _render_page_b64(fitz_page)
 
     doc.close()
 
-    # --- Pass 2: OCR in parallel ---
+    if cache_hits:
+        logger.info(f"[extractor] {cache_hits} pages served from OCR cache (no API call)")
+
+    # --- Pass 2: OCR in parallel (only uncached pages) ---
     ocr_results: Dict[int, str] = {}
     if to_ocr:
         logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
@@ -188,13 +223,21 @@ def extract_pages(pdf_path: str) -> ExtractionResult:
                 page_num, text = future.result()
                 ocr_results[page_num] = text
 
+        # Persist new results to cache
+        if ocr_cache_path:
+            ocr_cache.update(ocr_results)
+            _save_ocr_cache(ocr_cache_path, ocr_cache)
+            logger.info(f"[extractor] OCR cache updated ({len(ocr_cache)} pages total)")
+
     # --- Assemble final page list in order ---
     pages: List[PageContent] = []
     ocr_count = 0
 
     for i in range(1, total + 1):
-        if i in to_ocr:
-            ocr_text = ocr_results.get(i, "").strip()
+        needs_ocr_page = i in to_ocr or i in ocr_cache
+        if needs_ocr_page:
+            # Prefer freshly fetched result; fall back to cache for cache-hit pages
+            ocr_text = ocr_results.get(i, ocr_cache.get(i, "")).strip()
             nat = native[i].strip()
             if ocr_text:
                 # Merge: prefer OCR but prepend any unique native text

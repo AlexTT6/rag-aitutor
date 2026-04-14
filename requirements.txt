@@ -11,3 +11,4 @@ sentence-transformers>=3.0.0
 tiktoken>=0.7.0
 slowapi>=0.1.9
 python-multipart>=0.0.9
+fastembed>=0.3.6

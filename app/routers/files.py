@@ -192,13 +192,14 @@ def delete_file(
     db.delete(db_file)
     db.commit()
 
-    # Delete the PDF from disk after committing the Postgres delete.
-    # If this fails, the file record is already gone — the orphaned file on disk
-    # is harmless and can be cleaned up by a maintenance job.
-    if os.path.exists(storage_path):
-        try:
-            os.remove(storage_path)
-        except OSError:
-            pass  # log in production; do not fail the response
+    # Delete the PDF and OCR cache from disk after committing the Postgres delete.
+    # If this fails, the file record is already gone — orphaned files on disk
+    # are harmless and can be cleaned up by a maintenance job.
+    for path in (storage_path, storage_path.replace(".pdf", "_ocr_cache.json")):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # log in production; do not fail the response
 
     return FileDeleteResponse(file_id=file_id, deleted=True)

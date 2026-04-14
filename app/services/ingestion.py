@@ -10,6 +10,7 @@ from app.models.file import File, FileStatus
 from app.services.chunker import chunk_document
 from app.services.embedder import get_embeddings
 from app.services.extractor import extract_pages
+from app.services.sparse_embedder import get_sparse_embeddings
 from app.services.vector_store import delete_by_file_id, insert_chunks
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,8 @@ def run_ingestion(file_id: str, db: Session) -> None:
         file.status = FileStatus.extracting
         db.commit()
         logger.info(f"[ingestion] extracting pages file_id={file_id}")
-        extraction = extract_pages(file.storage_path)
+        ocr_cache_path = file.storage_path.replace(".pdf", "_ocr_cache.json")
+        extraction = extract_pages(file.storage_path, ocr_cache_path=ocr_cache_path)
         file.total_page_count = extraction.total_page_count
         file.extractable_page_count = extraction.extractable_page_count
         db.commit()
@@ -80,7 +82,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
             )
         logger.info(f"[ingestion] chunked file_id={file_id} chunks={len(chunks)}")
 
-        # Phase 6 — embed chunks
+        # Phase 6 — embed chunks (dense + sparse)
         file.status = FileStatus.embedding
         db.commit()
         logger.info(f"[ingestion] embedding file_id={file_id} chunks={len(chunks)}")
@@ -89,6 +91,15 @@ def run_ingestion(file_id: str, db: Session) -> None:
             embeddings = get_embeddings(texts)
         except Exception as embed_err:
             raise ValueError(f"Embedding failed: {embed_err}") from embed_err
+
+        sparse_embeddings = None
+        if settings.HYBRID_SEARCH:
+            try:
+                sparse_embeddings = get_sparse_embeddings(texts)
+                logger.info(f"[ingestion] sparse embeddings done file_id={file_id}")
+            except Exception as sparse_err:
+                logger.warning(f"[ingestion] sparse embedding failed (continuing without): {sparse_err}")
+
         logger.info(f"[ingestion] embedded file_id={file_id}")
 
         # Phase 7 — write to Qdrant
@@ -98,6 +109,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
             course_id=str(file.course_id),
             chunks=chunks,
             embeddings=embeddings,
+            sparse_embeddings=sparse_embeddings,
             filename=file.filename or "",
         )
         qdrant_vectors_written = True

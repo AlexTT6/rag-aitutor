@@ -120,6 +120,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"[startup] local model pre-load failed: {e}")
 
+    # --- Pre-warm sparse embedder (downloads BM25 model if not cached) ---
+    if settings.HYBRID_SEARCH:
+        try:
+            from app.services.sparse_embedder import _get_model
+            _get_model()
+            logger.info("[startup] sparse BM25 model ready")
+        except Exception as e:
+            logger.warning(f"[startup] sparse embedder pre-warm failed (non-fatal): {e}")
+
     # --- Recover stuck files ---
     to_requeue: list[str] = []
     try:

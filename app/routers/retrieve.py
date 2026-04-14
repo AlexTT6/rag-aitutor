@@ -12,41 +12,6 @@ from app.services.vector_store import search_chunks
 router = APIRouter(tags=["retrieve"])
 logger = logging.getLogger(__name__)
 
-# Dynamic retrieval: if top_k results are all below threshold,
-# retry with a larger top_k before giving up.
-_TOP_K_LADDER = [5, 10, 15]
-
-
-def _search_with_fallback(
-    query_vector: list,
-    course_id: str,
-    requested_top_k: int,
-) -> tuple[list, bool]:
-    """
-    Tries top_k values in _TOP_K_LADDER (starting from requested_top_k).
-    Returns (hits, all_low_confidence).
-    Stops as soon as at least one result is above threshold.
-    """
-    ladder = sorted(set([requested_top_k] + _TOP_K_LADDER))
-
-    for k in ladder:
-        hits = search_chunks(query_vector, course_id, top_k=k)
-        if not hits:
-            continue
-
-        best = max(h.score for h in hits)
-        if best >= settings.RETRIEVAL_SCORE_THRESHOLD:
-            logger.info(f"[retrieve] found confident results at top_k={k} best={best:.3f}")
-            return hits, False
-
-        logger.info(
-            f"[retrieve] top_k={k} best_score={best:.3f} < "
-            f"{settings.RETRIEVAL_SCORE_THRESHOLD} — trying larger top_k"
-        )
-
-    # All ladder steps exhausted — still low confidence
-    return hits if hits else [], True
-
 
 @router.post("/retrieve", response_model=RetrieveResponse)
 def retrieve(
@@ -63,26 +28,48 @@ def retrieve(
             detail=f"top_k cannot exceed {settings.TOP_K_MAX}.",
         )
 
-    query_vector = embed_query(req.query)
-    if not query_vector:
+    # --- Step 1: embed query ---
+    dense_vector = embed_query(req.query)
+    if not dense_vector:
         raise HTTPException(status_code=500, detail="Embedding failed.")
 
-    hits, all_low = _search_with_fallback(query_vector, str(req.course_id), top_k)
+    # --- Step 2: hybrid search ---
+    sparse_vector = None
+    if settings.HYBRID_SEARCH:
+        try:
+            from app.services.sparse_embedder import get_sparse_embedding
+            sparse_vector = get_sparse_embedding(req.query)
+        except Exception as e:
+            logger.warning(f"[retrieve] sparse embedding failed, falling back to dense: {e}")
 
-    if not hits or all_low:
-        logger.info(
-            f"[retrieve] returning empty — all scores below threshold "
-            f"query='{req.query[:60]}'"
-        )
+    fetch_k = settings.RERANKER_FETCH_K if settings.RERANKER_ENABLED else top_k
+    fetch_k = max(fetch_k, top_k)
+
+    hits = search_chunks(dense_vector, str(req.course_id), fetch_k, sparse_vector)
+
+    if not hits:
+        logger.info(f"[retrieve] no results for query='{req.query[:60]}'")
         return RetrieveResponse(results=[])
 
-    # Build results from Qdrant payload — no Postgres JOIN needed.
-    # Chunks indexed before the payload migration fall back to Postgres.
+    # --- Step 3: rerank ---
+    if settings.RERANKER_ENABLED and len(hits) > top_k:
+        try:
+            from app.services.reranker import rerank
+            hits = rerank(req.query, hits, top_k)
+        except Exception as e:
+            logger.warning(f"[retrieve] reranker failed, using original order: {e}")
+            hits = hits[:top_k]
+    else:
+        hits = hits[:top_k]
+
+    # --- Step 4: filter by threshold (for dense/RRF scores) and build results ---
     results: list[ChunkResult] = []
     missing_from_payload: list[str] = []
 
     for hit in hits:
-        if hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
+        # For hybrid RRF results the score is rank-based (0.001–0.1 range),
+        # so skip threshold filtering when hybrid search is active.
+        if not settings.HYBRID_SEARCH and hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
             continue
 
         payload = hit.payload or {}
@@ -119,7 +106,7 @@ def retrieve(
         )
         for chunk in db_chunks:
             score = score_map.get(chunk.qdrant_id, 0.0)
-            if score < settings.RETRIEVAL_SCORE_THRESHOLD:
+            if not settings.HYBRID_SEARCH and score < settings.RETRIEVAL_SCORE_THRESHOLD:
                 continue
             results.append(
                 ChunkResult(
@@ -134,13 +121,15 @@ def retrieve(
                 )
             )
 
-    # Preserve Qdrant ranking order
-    order = {str(h.id): i for i, h in enumerate(hits)}
-    results.sort(key=lambda r: order.get(r.chunk_id, 999))
+    if not results:
+        logger.info(f"[retrieve] all results below threshold query='{req.query[:60]}'")
+        return RetrieveResponse(results=[])
 
     logger.info(
         f"[retrieve] {len(results)} results "
-        f"best={max((r.score for r in results), default=0):.3f} "
+        f"best={max(r.score for r in results):.4f} "
+        f"hybrid={'yes' if sparse_vector else 'no'} "
+        f"reranked={settings.RERANKER_ENABLED} "
         f"query='{req.query[:60]}'"
     )
     return RetrieveResponse(results=results)

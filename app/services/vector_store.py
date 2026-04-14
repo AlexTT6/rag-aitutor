@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Optional
 
@@ -7,16 +8,21 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    Fusion,
     MatchValue,
     PointStruct,
+    Prefetch,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
 from app.config import settings
 from app.services.chunker import Chunk
 
-# Module-level singleton. Created once on first call to get_client() and
-# reused for every subsequent operation. Avoids per-call connection overhead.
+logger = logging.getLogger(__name__)
+
+# Module-level singleton.
 _client: Optional[QdrantClient] = None
 
 
@@ -35,21 +41,40 @@ def get_client() -> QdrantClient:
 
 
 def ensure_collection(vector_size: int) -> None:
+    """
+    Creates the Qdrant collection with named dense + sparse vectors if it doesn't exist.
+    Migrates from old single-vector schema automatically (requires re-indexing all files).
+    """
     client = get_client()
     existing_names = [c.name for c in client.get_collections().collections]
 
     if settings.QDRANT_COLLECTION in existing_names:
-        # Check dimension matches — if not, drop and recreate.
-        # This happens when switching from local (384) to OpenAI (1536) embeddings.
         info = client.get_collection(settings.QDRANT_COLLECTION)
-        existing_size = info.config.params.vectors.size
-        if existing_size != vector_size:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"[vector_store] collection dimension mismatch "
-                f"(existing={existing_size}, required={vector_size}) — "
-                f"dropping and recreating collection"
+        vectors_config = info.config.params.vectors
+
+        needs_recreate = False
+
+        if isinstance(vectors_config, dict):
+            # New named-vector schema — check "dense" dimension
+            if "dense" not in vectors_config:
+                logger.warning("[vector_store] 'dense' key missing — recreating collection")
+                needs_recreate = True
+            elif vectors_config["dense"].size != vector_size:
+                logger.warning(
+                    f"[vector_store] dimension mismatch "
+                    f"(existing={vectors_config['dense'].size}, required={vector_size}) "
+                    f"— recreating collection"
+                )
+                needs_recreate = True
+        else:
+            # Old unnamed single-vector schema — migrate to hybrid
+            logger.warning(
+                "[vector_store] old single-vector schema detected — "
+                "migrating to hybrid schema. All files must be re-indexed."
             )
+            needs_recreate = True
+
+        if needs_recreate:
             client.delete_collection(settings.QDRANT_COLLECTION)
             existing_names = []
 
@@ -57,14 +82,23 @@ def ensure_collection(vector_size: int) -> None:
         try:
             client.create_collection(
                 collection_name=settings.QDRANT_COLLECTION,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                vectors_config={
+                    "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(),
+                },
+            )
+            logger.info(
+                f"[vector_store] created hybrid collection "
+                f"dim={vector_size} sparse=BM25"
             )
         except Exception:
             existing_names = [c.name for c in client.get_collections().collections]
             if settings.QDRANT_COLLECTION not in existing_names:
                 raise
 
-    # create_payload_index is idempotent — safe to call on every startup.
+    # Payload indexes — idempotent
     client.create_payload_index(
         collection_name=settings.QDRANT_COLLECTION,
         field_name="course_id",
@@ -82,6 +116,7 @@ def insert_chunks(
     course_id: str,
     chunks: list[Chunk],
     embeddings: list[list[float]],
+    sparse_embeddings: Optional[list[SparseVector]] = None,
     filename: str = "",
 ) -> list[str]:
     if len(chunks) != len(embeddings):
@@ -95,9 +130,18 @@ def insert_chunks(
     points: list[PointStruct] = []
     qdrant_ids: list[str] = []
 
-    for chunk, vector in zip(chunks, embeddings):
+    for i, (chunk, dense_vec) in enumerate(zip(chunks, embeddings)):
         qid = str(uuid.uuid4())
         qdrant_ids.append(qid)
+
+        if sparse_embeddings and i < len(sparse_embeddings):
+            vector = {
+                "dense": dense_vec,
+                "sparse": sparse_embeddings[i],
+            }
+        else:
+            vector = {"dense": dense_vec}
+
         points.append(
             PointStruct(
                 id=qid,
@@ -128,20 +172,55 @@ def search_chunks(
     query_vector: list[float],
     course_id: str,
     top_k: int,
+    sparse_query: Optional[SparseVector] = None,
 ) -> list:
+    """
+    Searches for relevant chunks.
+    - If sparse_query is provided: hybrid search (dense + BM25) fused via RRF.
+    - Otherwise: pure dense vector search (fallback).
+    """
     client = get_client()
     existing_names = [c.name for c in client.get_collections().collections]
     if settings.QDRANT_COLLECTION not in existing_names:
         return []
-    result = client.query_points(
-        collection_name=settings.QDRANT_COLLECTION,
-        query=query_vector,
-        query_filter=Filter(
-            must=[FieldCondition(key="course_id", match=MatchValue(value=course_id))]
-        ),
-        limit=top_k,
-        with_payload=True,
+
+    course_filter = Filter(
+        must=[FieldCondition(key="course_id", match=MatchValue(value=course_id))]
     )
+
+    if sparse_query is not None:
+        # Hybrid: prefetch from both dense and sparse, then RRF fusion
+        result = client.query_points(
+            collection_name=settings.QDRANT_COLLECTION,
+            prefetch=[
+                Prefetch(
+                    query=query_vector,
+                    using="dense",
+                    filter=course_filter,
+                    limit=top_k * 2,
+                ),
+                Prefetch(
+                    query=sparse_query,
+                    using="sparse",
+                    filter=course_filter,
+                    limit=top_k * 2,
+                ),
+            ],
+            query=Fusion.RRF,
+            limit=top_k,
+            with_payload=True,
+        )
+    else:
+        # Dense-only fallback
+        result = client.query_points(
+            collection_name=settings.QDRANT_COLLECTION,
+            query=query_vector,
+            using="dense",
+            query_filter=course_filter,
+            limit=top_k,
+            with_payload=True,
+        )
+
     return result.points
 
 
@@ -158,9 +237,6 @@ def count_by_file_id(file_id: str) -> int:
 
 
 def delete_by_file_id(file_id: str) -> None:
-    # Accepts a plain str. Never pass an ORM object — it may be detached.
-    # Idempotent: deleting a file_id with no matching vectors is a no-op.
-    # Does not return a count; call count_by_file_id() first if needed.
     client = get_client()
     client.delete(
         collection_name=settings.QDRANT_COLLECTION,
