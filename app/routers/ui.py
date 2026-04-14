@@ -165,10 +165,14 @@ _HTML = """<!DOCTYPE html>
     padding: 4px 12px; border-radius: 20px;
     font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
   }
-  .status-pill.uploaded { background: rgba(245,158,11,0.15); color: var(--warning); }
+  .status-pill.uploaded   { background: rgba(245,158,11,0.15); color: var(--warning); }
   .status-pill.processing { background: rgba(108,99,255,0.15); color: var(--accent); }
-  .status-pill.indexed { background: rgba(34,197,94,0.15); color: var(--success); }
-  .status-pill.failed { background: rgba(239,68,68,0.15); color: var(--error); }
+  .status-pill.extracting { background: rgba(108,99,255,0.15); color: var(--accent); }
+  .status-pill.ocr        { background: rgba(168,85,247,0.15); color: #a855f7; }
+  .status-pill.chunking   { background: rgba(59,130,246,0.15); color: #3b82f6; }
+  .status-pill.embedding  { background: rgba(20,184,166,0.15); color: #14b8a6; }
+  .status-pill.indexed    { background: rgba(34,197,94,0.15);  color: var(--success); }
+  .status-pill.failed     { background: rgba(239,68,68,0.15);  color: var(--error); }
 
   .progress-bar {
     height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 12px;
@@ -577,7 +581,12 @@ async function pollOnce() {
       stopPolling();
       document.getElementById('badge3').textContent = 'Failed';
     } else {
-      addLog(`status: ${data.status}`, 'info');
+      const statusEmoji = {
+        uploaded: '📤', extracting: '📄', ocr: '🔍',
+        chunking: '✂️', embedding: '🧠', indexed: '✅', failed: '❌'
+      };
+      const emoji = statusEmoji[data.status] || '⏳';
+      addLog(`${emoji} ${data.status}`, 'info');
     }
   } catch (e) {
     addLog('error: ' + e.message, 'err');

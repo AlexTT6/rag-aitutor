@@ -26,10 +26,28 @@ logger = logging.getLogger(__name__)
 
 # Pages with fewer chars than this get sent to Vision OCR
 OCR_MIN_CHARS = 50
-# Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps PNG small
+# Pages where less than this fraction of chars are alphanumeric are garbage text
+OCR_MIN_ALPHA_RATIO = 0.40
+# Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps image small
 OCR_DPI = 120
 # Max parallel OCR requests to OpenAI
 OCR_MAX_WORKERS = 8
+
+
+def _is_good_text(text: str) -> bool:
+    """
+    Returns True if the extracted text looks real.
+    Catches cases like garbled scans where PyMuPDF extracts garbage characters.
+
+    Checks:
+    - Minimum character count
+    - Minimum ratio of alphanumeric chars (letters + digits) to total
+    """
+    if len(text) < OCR_MIN_CHARS:
+        return False
+    alphanumeric = sum(1 for c in text if c.isalnum())
+    ratio = alphanumeric / len(text)
+    return ratio >= OCR_MIN_ALPHA_RATIO
 
 
 @dataclass
@@ -129,12 +147,13 @@ def extract_pages(pdf_path: str) -> ExtractionResult:
     # page_num → base64 PNG  (only for image-only pages)
     to_ocr: Dict[int, str] = {}
 
-    # --- Pass 1: extract text + render image pages (must be single-threaded) ---
+    # --- Pass 1: extract text + render bad pages (must be single-threaded) ---
     for i, fitz_page in enumerate(doc, start=1):
         text = fitz_page.get_text("text").strip()
         native[i] = text
-        if len(text) < OCR_MIN_CHARS:
-            logger.info(f"[extractor] page {i} → only {len(text)} chars, queuing for OCR")
+        if not _is_good_text(text):
+            reason = "too short" if len(text) < OCR_MIN_CHARS else "garbage text"
+            logger.info(f"[extractor] page {i} → {reason} ({len(text)} chars), queuing for OCR")
             to_ocr[i] = _render_page_b64(fitz_page)
 
     doc.close()

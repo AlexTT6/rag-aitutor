@@ -36,6 +36,8 @@ def run_ingestion(file_id: str, db: Session) -> None:
 
     try:
         # Phase 2 — extract text from PDF
+        file.status = FileStatus.extracting
+        db.commit()
         logger.info(f"[ingestion] extracting pages file_id={file_id}")
         extraction = extract_pages(file.storage_path)
         file.total_page_count = extraction.total_page_count
@@ -64,6 +66,11 @@ def run_ingestion(file_id: str, db: Session) -> None:
             )
 
         # Phase 5 — chunk text
+        if extraction.ocr_page_count > 0:
+            file.status = FileStatus.ocr
+            db.commit()
+        file.status = FileStatus.chunking
+        db.commit()
         logger.info(f"[ingestion] chunking file_id={file_id}")
         chunks = chunk_document(extraction.pages)
         if not chunks:
@@ -74,6 +81,8 @@ def run_ingestion(file_id: str, db: Session) -> None:
         logger.info(f"[ingestion] chunked file_id={file_id} chunks={len(chunks)}")
 
         # Phase 6 — embed chunks
+        file.status = FileStatus.embedding
+        db.commit()
         logger.info(f"[ingestion] embedding file_id={file_id} chunks={len(chunks)}")
         try:
             texts = [c.text for c in chunks]

@@ -14,7 +14,10 @@ class FileStatus(str, enum.Enum):
     # calling .value. Stored as String (not SQLAlchemy Enum) to avoid
     # CREATE TYPE DDL and migration friction when adding values.
     uploaded = "uploaded"
-    processing = "processing"
+    extracting = "extracting"   # reading text from PDF pages
+    ocr = "ocr"                 # running Vision OCR on image pages
+    chunking = "chunking"       # splitting text into chunks
+    embedding = "embedding"     # generating vectors
     indexed = "indexed"
     failed = "failed"
 
