@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -27,8 +27,9 @@ class Settings(BaseSettings):
     # Max seconds for a single OCR API call before giving up on that page
     OCR_TIMEOUT: float = 30.0
 
-    class Config:
-        env_file = ".env"
+    # extra="ignore" silently skips any env vars not declared above.
+    # Required because Railway injects its own vars and .env may have stale keys.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()
