@@ -189,29 +189,39 @@ def search_chunks(
     )
 
     if sparse_query is not None:
-        # Hybrid: prefetch from both dense and sparse, then RRF fusion
-        result = client.query_points(
-            collection_name=settings.QDRANT_COLLECTION,
-            prefetch=[
-                Prefetch(
-                    query=query_vector,
-                    using="dense",
-                    filter=course_filter,
-                    limit=top_k * 2,
-                ),
-                Prefetch(
-                    query=sparse_query,
-                    using="sparse",
-                    filter=course_filter,
-                    limit=top_k * 2,
-                ),
-            ],
-            query=Fusion.RRF,
-            limit=top_k,
-            with_payload=True,
-        )
-    else:
-        # Dense-only fallback
+        # Hybrid: prefetch from both dense and sparse, then RRF fusion.
+        # Falls back to dense-only if server version doesn't support hybrid queries.
+        try:
+            result = client.query_points(
+                collection_name=settings.QDRANT_COLLECTION,
+                prefetch=[
+                    Prefetch(
+                        query=query_vector,
+                        using="dense",
+                        filter=course_filter,
+                        limit=top_k * 2,
+                    ),
+                    Prefetch(
+                        query=sparse_query,
+                        using="sparse",
+                        filter=course_filter,
+                        limit=top_k * 2,
+                    ),
+                ],
+                query=Fusion.RRF,
+                limit=top_k,
+                with_payload=True,
+            )
+            return result.points
+        except Exception as e:
+            logger.warning(
+                f"[vector_store] hybrid search failed ({e.__class__.__name__}) "
+                f"— falling back to dense-only"
+            )
+
+    # Dense-only (default or fallback).
+    # Try named "dense" vector first; fall back to unnamed vector for old collections.
+    try:
         result = client.query_points(
             collection_name=settings.QDRANT_COLLECTION,
             query=query_vector,
@@ -220,7 +230,14 @@ def search_chunks(
             limit=top_k,
             with_payload=True,
         )
-
+    except Exception:
+        result = client.query_points(
+            collection_name=settings.QDRANT_COLLECTION,
+            query=query_vector,
+            query_filter=course_filter,
+            limit=top_k,
+            with_payload=True,
+        )
     return result.points
 
 

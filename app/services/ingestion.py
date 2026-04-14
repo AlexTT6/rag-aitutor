@@ -82,23 +82,38 @@ def run_ingestion(file_id: str, db: Session) -> None:
             )
         logger.info(f"[ingestion] chunked file_id={file_id} chunks={len(chunks)}")
 
-        # Phase 6 — embed chunks (dense + sparse)
+        # Phase 6 — embed chunks (dense + sparse in parallel)
         file.status = FileStatus.embedding
         db.commit()
         logger.info(f"[ingestion] embedding file_id={file_id} chunks={len(chunks)}")
-        try:
-            texts = [c.text for c in chunks]
-            embeddings = get_embeddings(texts)
-        except Exception as embed_err:
-            raise ValueError(f"Embedding failed: {embed_err}") from embed_err
+        texts = [c.text for c in chunks]
 
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        embeddings = None
         sparse_embeddings = None
-        if settings.HYBRID_SEARCH:
+
+        def _run_dense():
+            return get_embeddings(texts)
+
+        def _run_sparse():
+            if not settings.HYBRID_SEARCH:
+                return None
             try:
-                sparse_embeddings = get_sparse_embeddings(texts)
+                result = get_sparse_embeddings(texts)
                 logger.info(f"[ingestion] sparse embeddings done file_id={file_id}")
+                return result
             except Exception as sparse_err:
                 logger.warning(f"[ingestion] sparse embedding failed (continuing without): {sparse_err}")
+                return None
+
+        with _TPE(max_workers=2) as pool:
+            dense_future = pool.submit(_run_dense)
+            sparse_future = pool.submit(_run_sparse)
+            try:
+                embeddings = dense_future.result()
+            except Exception as embed_err:
+                raise ValueError(f"Embedding failed: {embed_err}") from embed_err
+            sparse_embeddings = sparse_future.result()
 
         logger.info(f"[ingestion] embedded file_id={file_id}")
 
