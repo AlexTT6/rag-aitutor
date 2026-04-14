@@ -48,10 +48,12 @@ class ExtractionResult:
 
 
 def _render_page_b64(fitz_page: fitz.Page) -> str:
-    """Renders a PDF page to a base64-encoded PNG string."""
+    """Renders a PDF page to a base64-encoded JPEG string.
+    JPEG at 85% quality is ~10x smaller than PNG — faster API calls, same OCR accuracy.
+    """
     mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
     pix = fitz_page.get_pixmap(matrix=mat)
-    return base64.b64encode(pix.tobytes("png")).decode("utf-8")
+    return base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode("utf-8")
 
 
 def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
@@ -87,7 +89,7 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{b64_image}",
+                                "url": f"data:image/jpeg;base64,{b64_image}",
                                 "detail": "auto",
                             },
                         },
