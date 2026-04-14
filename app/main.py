@@ -205,7 +205,12 @@ def config_check() -> dict:
     try:
         info = client.get_collection(settings.QDRANT_COLLECTION)
         vector_count = info.points_count
-        vector_dim = info.config.params.vectors.size
+        vectors_cfg = info.config.params.vectors
+        if isinstance(vectors_cfg, dict):           # named-vector schema {"dense": ...}
+            dense = vectors_cfg.get("dense")
+            vector_dim = getattr(dense, "size", "unknown")
+        else:                                        # legacy single-vector schema
+            vector_dim = getattr(vectors_cfg, "size", "unknown")
     except Exception as e:
         vector_count = f"error: {e}"
         vector_dim = "unknown"
