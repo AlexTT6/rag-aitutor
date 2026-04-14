@@ -44,11 +44,20 @@ from app.services.vector_store import delete_by_file_id, ensure_collection, get_
 from app.tasks.executor import shutdown as shutdown_executor, submit_ingest
 
 
+_IN_PROGRESS_STATUSES = {
+    FileStatus.processing,
+    FileStatus.extracting,
+    FileStatus.ocr,
+    FileStatus.chunking,
+    FileStatus.embedding,
+}
+
+
 def _recover_stuck_files(db: Session) -> list[str]:
     """
     Recovers two classes of stuck files on startup:
 
-    1. "processing" — ingestion task started but the process crashed mid-pipeline.
+    1. Any in-progress status — ingestion task started but the process crashed.
        Partial Qdrant vectors are cleaned up and status is reset to "uploaded"
        so the file can be re-queued below.
 
@@ -58,17 +67,22 @@ def _recover_stuck_files(db: Session) -> list[str]:
 
     Returns the file_ids that should be re-queued by the caller.
     """
-    # Reset processing → uploaded
-    stuck = db.query(File).filter(File.status == FileStatus.processing).all()
+    # Reset all in-progress statuses → uploaded
+    stuck = (
+        db.query(File)
+        .filter(File.status.in_([s.value for s in _IN_PROGRESS_STATUSES]))
+        .all()
+    )
     for f in stuck:
         try:
             delete_by_file_id(str(f.id))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[startup] Qdrant cleanup failed for file_id={f.id}: {e}")
         f.status = FileStatus.uploaded
         f.error_message = "Ingestion interrupted by server restart. Re-queued automatically."
     if stuck:
         db.commit()
+        logger.info(f"[startup] reset {len(stuck)} stuck file(s) to uploaded")
 
     # Collect stale uploaded files (includes any just reset above)
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
@@ -82,19 +96,40 @@ def _recover_stuck_files(db: Session) -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    ensure_collection(vector_size=settings.EMBEDDING_DIM)
-
-    # Pre-load embedding model so the first upload is not slow
-    if settings.EMBEDDING_PROVIDER == "local":
-        from app.services.embedder import _get_local_model
-        _get_local_model()
-
-    db = SessionLocal()
+    # --- DB schema ---
     try:
-        to_requeue = _recover_stuck_files(db)
-    finally:
-        db.close()
+        Base.metadata.create_all(bind=engine)
+        logger.info("[startup] DB schema ready")
+    except Exception as e:
+        logger.error(f"[startup] DB schema creation failed: {e}")
+        raise
+
+    # --- Qdrant collection ---
+    try:
+        ensure_collection(vector_size=settings.EMBEDDING_DIM)
+        logger.info("[startup] Qdrant collection ready")
+    except Exception as e:
+        logger.error(f"[startup] Qdrant collection setup failed: {e}")
+        raise
+
+    # --- Pre-load local embedding model ---
+    if settings.EMBEDDING_PROVIDER == "local":
+        try:
+            from app.services.embedder import _get_local_model
+            _get_local_model()
+        except Exception as e:
+            logger.error(f"[startup] local model pre-load failed: {e}")
+
+    # --- Recover stuck files ---
+    to_requeue: list[str] = []
+    try:
+        db = SessionLocal()
+        try:
+            to_requeue = _recover_stuck_files(db)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"[startup] file recovery failed (non-fatal): {e}")
 
     # Re-queue via executor — same bounded pool, respects MAX_CONCURRENT_JOBS.
     for file_id in to_requeue:

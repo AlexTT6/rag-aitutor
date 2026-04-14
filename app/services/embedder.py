@@ -1,7 +1,11 @@
 import collections
+import logging
 import threading
+import time
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _local_model = None
 
@@ -62,8 +66,21 @@ def _openai_embed(texts: list[str]) -> list[list[float]]:
 
     for i in range(0, len(texts), 100):
         batch = texts[i : i + 100]
-        response = client.embeddings.create(model="text-embedding-3-small", input=batch)
-        all_embeddings.extend([item.embedding for item in response.data])
+        last_err = None
+        for attempt in range(3):
+            try:
+                response = client.embeddings.create(
+                    model="text-embedding-3-small", input=batch
+                )
+                all_embeddings.extend([item.embedding for item in response.data])
+                break
+            except Exception as e:
+                last_err = e
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning(f"[embedder] OpenAI attempt {attempt+1} failed: {e} — retrying in {wait}s")
+                time.sleep(wait)
+        else:
+            raise RuntimeError(f"OpenAI embedding failed after 3 attempts: {last_err}")
 
     return all_embeddings
 
