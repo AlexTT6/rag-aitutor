@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 OCR_MIN_CHARS = 50
 # Pages where less than this fraction of chars are alphanumeric are garbage text
 OCR_MIN_ALPHA_RATIO = 0.40
+# Pages with images AND fewer than this many chars also get OCR (catches theorem boxes)
+OCR_IMAGE_PAGE_THRESHOLD = 300
 # Render resolution — 120 DPI is plenty for gpt-4o-mini, keeps image small
 OCR_DPI = 120
 # Max parallel OCR requests to OpenAI
@@ -156,9 +158,19 @@ def extract_pages(pdf_path: str) -> ExtractionResult:
     for i, fitz_page in enumerate(doc, start=1):
         text = fitz_page.get_text("text").strip()
         native[i] = text
-        if not _is_good_text(text):
-            reason = "too short" if len(text) < OCR_MIN_CHARS else "garbage text"
-            logger.info(f"[extractor] page {i} → {reason} ({len(text)} chars), queuing for OCR")
+        has_images = len(fitz_page.get_images()) > 0
+
+        needs_ocr = (
+            not _is_good_text(text)                                     # too short or garbage
+            or (has_images and len(text) < OCR_IMAGE_PAGE_THRESHOLD)    # has image boxes + little text
+        )
+        if needs_ocr:
+            reason = (
+                "too short" if len(text) < OCR_MIN_CHARS
+                else "garbage text" if not _is_good_text(text)
+                else f"has images + only {len(text)} chars"
+            )
+            logger.info(f"[extractor] page {i} → {reason}, queuing for OCR")
             to_ocr[i] = _render_page_b64(fitz_page)
 
     doc.close()
@@ -183,12 +195,15 @@ def extract_pages(pdf_path: str) -> ExtractionResult:
     for i in range(1, total + 1):
         if i in to_ocr:
             ocr_text = ocr_results.get(i, "").strip()
+            nat = native[i].strip()
             if ocr_text:
-                pages.append(PageContent(page=i, text=ocr_text, ocr_used=True))
+                # Merge: prefer OCR but prepend any unique native text
+                # (OCR already sees the full page, so it usually contains native text too)
+                combined = ocr_text if not nat else f"{nat}\n{ocr_text}"
+                pages.append(PageContent(page=i, text=combined, ocr_used=True))
                 ocr_count += 1
-            elif native[i]:
-                # OCR failed but we had a little native text — keep it
-                pages.append(PageContent(page=i, text=native[i], ocr_used=False))
+            elif nat:
+                pages.append(PageContent(page=i, text=nat, ocr_used=False))
         else:
             if native[i]:
                 pages.append(PageContent(page=i, text=native[i], ocr_used=False))
