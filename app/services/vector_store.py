@@ -40,10 +40,11 @@ def get_client() -> QdrantClient:
     return _client
 
 
-def ensure_collection(vector_size: int) -> None:
+def ensure_collection(vector_size: int) -> bool:
     """
     Creates the Qdrant collection with named dense + sparse vectors if it doesn't exist.
-    Migrates from old single-vector schema automatically (requires re-indexing all files).
+    Migrates from old single-vector schema automatically.
+    Returns True if the collection was recreated (all files need re-indexing).
     """
     client = get_client()
     existing_names = [c.name for c in client.get_collections().collections]
@@ -78,6 +79,7 @@ def ensure_collection(vector_size: int) -> None:
             client.delete_collection(settings.QDRANT_COLLECTION)
             existing_names = []
 
+    collection_created = False
     if settings.QDRANT_COLLECTION not in existing_names:
         try:
             client.create_collection(
@@ -89,6 +91,7 @@ def ensure_collection(vector_size: int) -> None:
                     "sparse": SparseVectorParams(),
                 },
             )
+            collection_created = True
             logger.info(
                 f"[vector_store] created hybrid collection "
                 f"dim={vector_size} sparse=BM25"
@@ -109,6 +112,7 @@ def ensure_collection(vector_size: int) -> None:
         field_name="file_id",
         field_schema="keyword",
     )
+    return collection_created
 
 
 def insert_chunks(

@@ -105,8 +105,9 @@ async def lifespan(app: FastAPI):
         raise
 
     # --- Qdrant collection ---
+    collection_recreated = False
     try:
-        ensure_collection(vector_size=settings.EMBEDDING_DIM)
+        collection_recreated = ensure_collection(vector_size=settings.EMBEDDING_DIM)
         logger.info("[startup] Qdrant collection ready")
     except Exception as e:
         logger.error(f"[startup] Qdrant collection setup failed: {e}")
@@ -138,12 +139,32 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[startup] reranker pre-warm failed (non-fatal): {e}")
 
-    # --- Recover stuck files ---
+    # --- Recover stuck files + auto re-index if collection was recreated ---
     to_requeue: list[str] = []
     try:
         db = SessionLocal()
         try:
             to_requeue = _recover_stuck_files(db)
+            if collection_recreated:
+                # Collection was dropped and recreated (schema migration).
+                # All "indexed" files have lost their vectors — reset them to
+                # "uploaded" so they are automatically re-indexed now.
+                from app.models.file import File as _File
+                orphaned = (
+                    db.query(_File)
+                    .filter(_File.status == FileStatus.indexed)
+                    .all()
+                )
+                for f in orphaned:
+                    f.status = FileStatus.uploaded
+                    f.error_message = "Auto re-index after schema migration."
+                if orphaned:
+                    db.commit()
+                    logger.info(
+                        f"[startup] schema migration: queued {len(orphaned)} "
+                        f"file(s) for automatic re-indexing"
+                    )
+                    to_requeue += [str(f.id) for f in orphaned]
         finally:
             db.close()
     except Exception as e:

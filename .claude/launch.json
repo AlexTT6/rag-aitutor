@@ -3,8 +3,9 @@
   "configurations": [
     {
       "name": "Docker Compose (full stack)",
-      "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": ["/tmp/rag_start.sh"],
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "--build"],
+      "cwd": "/Users/alextadevosyan/Desktop/RAG_AItutor",
       "port": 8000
     }
   ]
