@@ -637,7 +637,7 @@ function renderResults(results) {
 
   const cards = results.map((r, i) => {
     const sc = r.score;
-    const scoreClass = sc >= 0.7 ? 'high' : sc >= 0.5 ? 'med' : 'low';
+    const scoreClass = sc >= 0.5 ? 'high' : sc >= 0.35 ? 'med' : 'low';
     const cardClass = r.low_confidence ? 'low' : '';
     const textId = 'rt_' + i;
     return `
