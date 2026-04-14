@@ -126,6 +126,39 @@ def get_file_status(
     return FileStatusResponse.from_orm_file(db_file)
 
 
+@router.post("/{file_id}/reindex", status_code=202)
+def reindex_file(
+    file_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Re-runs ingestion on an already-uploaded file. Useful after OCR improvements."""
+    from app.services.vector_store import delete_by_file_id
+    db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if db_file.status == FileStatus.processing:
+        raise HTTPException(status_code=409, detail="File is currently being processed.")
+    if not os.path.exists(db_file.storage_path):
+        raise HTTPException(status_code=404, detail="Original file not found on disk. Please re-upload.")
+
+    # Clean old vectors
+    try:
+        delete_by_file_id(file_id)
+    except Exception:
+        pass
+
+    db_file.status = FileStatus.uploaded
+    db_file.error_message = None
+    db_file.chunk_count = 0
+    db_file.indexed_at = None
+    db.commit()
+
+    if not submit_ingest(file_id):
+        raise HTTPException(status_code=503, detail="Server busy. Try again in a moment.")
+
+    return {"file_id": file_id, "status": "reindexing", "message": "Re-indexing started."}
+
+
 @router.delete("/{file_id}", response_model=FileDeleteResponse)
 def delete_file(
     file_id: str,

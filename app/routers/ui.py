@@ -603,7 +603,25 @@ function renderPollResult(data) {
       ${data.error_message ? `<div class="row-item"><span class="key">Error</span><span class="val" style="color:var(--error)">${escHtml(data.error_message)}</span></div>` : ''}
       ${data.indexed_at ? `<div class="row-item"><span class="key">Indexed at</span><span class="val">${new Date(data.indexed_at).toLocaleString()}</span></div>` : ''}
     </div>
-    <div class="progress-bar ${progressClass}"><div class="fill"></div></div>`;
+    <div class="progress-bar ${progressClass}"><div class="fill"></div></div>
+    ${data.status === 'indexed' || data.status === 'failed' ? `
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn" style="background:#6366f1" onclick="reindexFile('${data.file_id}')">🔄 Re-index</button>
+    </div>` : ''}`;
+}
+
+async function reindexFile(fileId) {
+  if (!confirm('Re-index this file with the latest OCR settings?')) return;
+  try {
+    const r = await fetch(API + '/files/' + fileId + '/reindex', { method: 'POST' });
+    let data;
+    try { data = await r.json(); } catch { throw new Error('Server error'); }
+    if (!r.ok) throw new Error(data.detail || 'Failed');
+    showAlert('pollResult', 'success', '🔄 Re-indexing started — watch status above');
+    setTimeout(() => startPolling(), 1000);
+  } catch(e) {
+    showAlert('pollResult', 'error', e.message);
+  }
 }
 
 // ─── Step 4: Retrieve ─────────────────────────────────────────────────────────
