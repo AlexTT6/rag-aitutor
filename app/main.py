@@ -121,14 +121,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"[startup] local model pre-load failed: {e}")
 
-    # --- Pre-warm reranker (downloads cross-encoder model ~80MB if not cached) ---
-    if settings.RERANKER_ENABLED:
-        try:
-            from app.services.reranker import _get_model
-            _get_model()
-            logger.info("[startup] reranker model ready")
-        except Exception as e:
-            logger.warning(f"[startup] reranker pre-warm failed (non-fatal): {e}")
 
     # --- Recover stuck files + auto re-index if collection was recreated ---
     to_requeue: list[str] = []
