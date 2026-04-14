@@ -97,6 +97,21 @@ def _save_ocr_cache(cache_path: str, cache: Dict[int, str]) -> None:
         logger.warning(f"[extractor] OCR cache write failed: {e}")
 
 
+def clear_ocr_cache_page(cache_path: str, page_num: int) -> bool:
+    """
+    Removes one page's entry from the OCR cache so it will be re-sent to OCR
+    on the next ingestion. Returns True if the entry existed and was removed.
+    """
+    cache = _load_ocr_cache(cache_path)
+    if page_num not in cache:
+        logger.info(f"[extractor] clear_ocr_cache_page page={page_num} — not in cache, nothing to do")
+        return False
+    del cache[page_num]
+    _save_ocr_cache(cache_path, cache)
+    logger.info(f"[extractor] clear_ocr_cache_page page={page_num} — entry removed, will retry on next index")
+    return True
+
+
 def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
     """
     Sends a pre-rendered page image to OpenAI Vision.
@@ -144,13 +159,17 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
         # Detect GPT refusal responses (model sometimes refuses image-only pages)
         refusal_phrases = ["unable to extract", "can't extract", "cannot extract", "i'm unable"]
         if any(p in text.lower() for p in refusal_phrases):
-            logger.warning(f"[extractor] OCR page {page_num} — model refused, treating as blank")
+            logger.warning(f"[extractor] OCR_REFUSED page={page_num} — model refused, result discarded")
             return page_num, ""
-        logger.info(f"[extractor] OCR page {page_num} → {len(text)} chars")
+        # Treat empty or whitespace-only response as a failure, not success
+        if not text.strip():
+            logger.warning(f"[extractor] OCR_EMPTY page={page_num} — model returned empty text, treating as failure")
+            return page_num, ""
+        logger.info(f"[extractor] OCR_SUCCESS page={page_num} chars={len(text)}")
         return page_num, text
 
     except Exception as e:
-        logger.error(f"[extractor] OCR failed page {page_num}: {e}")
+        logger.error(f"[extractor] OCR_FAILED page={page_num}: {e}")
         return page_num, ""
 
 
@@ -203,9 +222,14 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
             )
             if needs_ocr:
                 if i in ocr_cache:
-                    # Cache hit — skip rendering and API call entirely
-                    cache_hits += 1
-                    logger.debug(f"[extractor] page {i} → OCR cache hit")
+                    if ocr_cache[i].strip():
+                        # Valid cache hit — skip rendering and API call entirely
+                        cache_hits += 1
+                        logger.debug(f"[extractor] page {i} → OCR cache hit")
+                    else:
+                        # Stale empty cache entry — treat as uncached and re-queue
+                        logger.warning(f"[extractor] OCR_CACHE_EMPTY page={i} — cached value is empty, re-queuing for OCR")
+                        to_ocr[i] = _render_page_b64(fitz_page)
                 else:
                     reason = (
                         "too short" if len(text) < OCR_MIN_CHARS
@@ -231,11 +255,13 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
                 }
                 for future in as_completed(futures):
                     page_num, text = future.result()
-                    ocr_results[page_num] = text
+                    if text.strip():                    # only store successful results
+                        ocr_results[page_num] = text
 
-            # Persist new results to cache
+            # Persist new results to cache — empty strings are never written
             if ocr_cache_path:
-                ocr_cache.update(ocr_results)
+                valid_ocr = {k: v for k, v in ocr_results.items() if v.strip()}
+                ocr_cache.update(valid_ocr)
                 _save_ocr_cache(ocr_cache_path, ocr_cache)
                 logger.info(f"[extractor] OCR cache updated ({len(ocr_cache)} pages total)")
 
@@ -256,7 +282,13 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
                 pages.append(PageContent(page=i, text=combined, ocr_used=True))
                 ocr_count += 1
             elif nat:
+                logger.warning(
+                    f"[extractor] PAGE_OCR_FAILED page={i} — "
+                    f"OCR produced no text, falling back to native ({len(nat)} chars)"
+                )
                 pages.append(PageContent(page=i, text=nat, ocr_used=False))
+            else:
+                logger.warning(f"[extractor] PAGE_DROPPED page={i} — OCR empty and no native text")
         else:
             if native[i]:
                 pages.append(PageContent(page=i, text=native[i], ocr_used=False))
