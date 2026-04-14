@@ -126,6 +126,12 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
         from openai import OpenAI
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
+        logger.info(
+            f"[extractor] OCR_REQUEST page={page_num} "
+            f"image_b64_len={len(b64_image)} "
+            f"model=gpt-4o-mini detail=auto max_tokens=1500"
+        )
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -155,7 +161,15 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
             max_tokens=1500,
             timeout=settings.OCR_TIMEOUT,
         )
-        text = response.choices[0].message.content or ""
+        raw = response.choices[0].message.content
+        finish_reason = response.choices[0].finish_reason
+        text = raw or ""
+        logger.info(
+            f"[extractor] OCR_RESPONSE page={page_num} "
+            f"finish_reason={finish_reason!r} "
+            f"raw_len={len(text)} "
+            f"raw_preview={text[:120]!r}"
+        )
         # Detect GPT refusal responses (model sometimes refuses image-only pages)
         refusal_phrases = ["unable to extract", "can't extract", "cannot extract", "i'm unable"]
         if any(p in text.lower() for p in refusal_phrases):
