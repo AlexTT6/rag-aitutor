@@ -117,6 +117,11 @@ def _ocr_one(page_num: int, b64_image: str) -> Tuple[int, str]:
             max_tokens=1500,
         )
         text = response.choices[0].message.content or ""
+        # Detect GPT refusal responses (model sometimes refuses image-only pages)
+        refusal_phrases = ["unable to extract", "can't extract", "cannot extract", "i'm unable"]
+        if any(p in text.lower() for p in refusal_phrases):
+            logger.warning(f"[extractor] OCR page {page_num} — model refused, treating as blank")
+            return page_num, ""
         logger.info(f"[extractor] OCR page {page_num} → {len(text)} chars")
         return page_num, text
 
