@@ -28,6 +28,13 @@ def retrieve(
             detail=f"top_k cannot exceed {settings.TOP_K_MAX}.",
         )
 
+    logger.info(
+        f"[retrieve:debug] QUERY "
+        f"text={req.query!r} "
+        f"course_id={req.course_id} "
+        f"top_k={top_k}"
+    )
+
     # Step 1: embed query
     query_vector = embed_query(req.query)
     if not query_vector:
@@ -39,6 +46,8 @@ def retrieve(
     if not hits:
         logger.info(f"[retrieve] no results query='{req.query[:60]}'")
         return RetrieveResponse(results=[])
+
+    logger.info(f"[retrieve:debug] RAW_HITS count={len(hits)}")
 
     # Step 3: build results, filter by threshold
     results: list[ChunkResult] = []
@@ -65,6 +74,14 @@ def retrieve(
                 low_confidence=hit.score < settings.RETRIEVAL_SCORE_THRESHOLD,
             )
         )
+        logger.info(
+            f"[retrieve:debug] CHUNK "
+            f"id={hit.id} "
+            f"score={hit.score:.4f} "
+            f"text={text[:200]!r}"
+        )
+
+    logger.info(f"[retrieve:debug] RESULTS_RETURNED count={len(results)}")
 
     if not results:
         logger.info(f"[retrieve] all below threshold query='{req.query[:60]}'")
