@@ -32,8 +32,6 @@ logger = logging.getLogger(__name__)
 OCR_MIN_CHARS = 50
 # Pages where less than this fraction of chars are alphanumeric are garbage text
 OCR_MIN_ALPHA_RATIO = 0.40
-# Pages with images AND fewer than this many chars also get OCR (catches theorem boxes)
-OCR_IMAGE_PAGE_THRESHOLD = 300
 # Render resolution — 96 DPI keeps image small = faster API call, quality fine for text
 OCR_DPI = 96
 # Hard pages (image-heavy, near-zero native text) get 2× resolution + detail=high
@@ -358,30 +356,36 @@ def extract_pages(
             native[i] = text
 
             # Fast path: page already has a valid OCR result cached.
-            # Skip get_images() entirely — no need to re-evaluate, saves
-            # significant time on image-heavy PDFs during reindex.
             if i in ocr_cache and ocr_cache[i].strip():
                 cache_hits += 1
-                logger.debug(f"[extractor] page {i} → OCR cache hit")
+                logger.info(
+                    f"[extractor] page={i} chars={len(text)} decision=cache_hit"
+                )
                 continue
 
-            has_images = len(fitz_page.get_images()) > 0
+            # STRICT OCR POLICY: OCR runs only when native text is absent or garbage.
+            # A page with 100+ chars of readable text is indexed as-is — no Vision API call.
+            # Triggers:
+            #   (a) fewer than OCR_MIN_CHARS (50) characters
+            #   (b) text is mostly non-alphanumeric (garbage / scan artefacts)
+            needs_ocr = not _is_good_text(text)
 
-            needs_ocr = (
-                not _is_good_text(text)                                     # too short or garbage
-                or (has_images and len(text) < OCR_IMAGE_PAGE_THRESHOLD)    # has image boxes + little text
+            logger.info(
+                f"[extractor] page={i} chars={len(text)} "
+                f"decision={'ocr' if needs_ocr else 'native_only'}"
             )
+
             if needs_ocr:
                 if i in ocr_cache:
-                    # Cache entry exists but is empty — stale, re-queue
+                    # Stale empty cache entry — re-queue for OCR
                     if ocr_cache[i].strip():
-                        # Shouldn't reach here (handled above), but keep safe
-                        cache_hits += 1
-                        logger.debug(f"[extractor] page {i} → OCR cache hit")
+                        cache_hits += 1  # shouldn't reach here, but stay safe
                     else:
-                        # Stale empty cache entry — treat as uncached and re-queue
-                        logger.warning(f"[extractor] OCR_CACHE_EMPTY page={i} — cached value is empty, re-queuing for OCR")
-                        _is_hard = has_images and len(text) < OCR_MIN_CHARS
+                        logger.warning(
+                            f"[extractor] OCR_CACHE_EMPTY page={i} — re-queuing"
+                        )
+                        # Hard page: zero native text + page is image-based
+                        _is_hard = len(text) < OCR_MIN_CHARS
                         to_ocr[i] = (
                             _render_page_b64(
                                 fitz_page,
@@ -391,21 +395,15 @@ def extract_pages(
                             "high" if _is_hard else "auto",
                         )
                 else:
-                    is_hard = has_images and len(text) < OCR_MIN_CHARS
-                    dpi = OCR_HARD_DPI if is_hard else OCR_DPI
-                    ocr_detail = "high" if is_hard else "auto"
-                    reason = (
-                        "too short" if len(text) < OCR_MIN_CHARS
-                        else "garbage text" if not _is_good_text(text)
-                        else f"has images + only {len(text)} chars"
-                    )
-                    logger.info(
-                        f"[extractor] page {i} → {reason}, queuing for OCR "
-                        f"[dpi={dpi} detail={ocr_detail!r}]"
-                    )
+                    # Hard page = truly empty (< OCR_MIN_CHARS), use high-res + detail=high
+                    is_hard = len(text) < OCR_MIN_CHARS
                     to_ocr[i] = (
-                        _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85),
-                        ocr_detail,
+                        _render_page_b64(
+                            fitz_page,
+                            dpi=OCR_HARD_DPI if is_hard else OCR_DPI,
+                            quality=95 if is_hard else 85,
+                        ),
+                        "high" if is_hard else "auto",
                     )
 
         doc.close()

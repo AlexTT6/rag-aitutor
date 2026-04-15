@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Hard cap: at most 2 PDFs process at the same time.
 # Prevents CPU/RAM exhaustion on Railway's small container.
 MAX_CONCURRENT_JOBS = 2
-INGESTION_TIMEOUT_SECONDS = 120
+INGESTION_TIMEOUT_SECONDS = 600  # 10 min — OCR on large image-heavy PDFs can take 2–5 min
 
 _executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=MAX_CONCURRENT_JOBS,
