@@ -126,6 +126,15 @@ def get_file_status(
     return FileStatusResponse.from_orm_file(db_file)
 
 
+_IN_PROGRESS_STATUSES = {
+    FileStatus.processing,
+    FileStatus.extracting,
+    FileStatus.ocr,
+    FileStatus.chunking,
+    FileStatus.embedding,
+}
+
+
 @router.post("/{file_id}/reindex", status_code=202)
 def reindex_file(
     file_id: str,
@@ -136,8 +145,8 @@ def reindex_file(
     db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found.")
-    if db_file.status == FileStatus.processing:
-        raise HTTPException(status_code=409, detail="File is currently being processed.")
+    if db_file.status in _IN_PROGRESS_STATUSES:
+        raise HTTPException(status_code=409, detail=f"File is currently being processed (status={db_file.status}).")
     if not os.path.exists(db_file.storage_path):
         raise HTTPException(status_code=404, detail="Original file not found on disk. Please re-upload.")
 
@@ -177,10 +186,10 @@ def delete_file(
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found.")
 
-    if db_file.status == FileStatus.processing:
+    if db_file.status in _IN_PROGRESS_STATUSES:
         raise HTTPException(
             status_code=409,
-            detail="File is currently being processed. Try again after ingestion completes.",
+            detail=f"File is currently being processed (status={db_file.status}). Try again after ingestion completes.",
         )
 
     # Delete Qdrant vectors first. If this succeeds and Postgres delete fails,

@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -71,13 +72,14 @@ class ExtractionResult:
     ocr_page_count: int = 0
 
 
-def _render_page_b64(fitz_page: fitz.Page, dpi: int = OCR_DPI) -> str:
+def _render_page_b64(fitz_page: fitz.Page, dpi: int = OCR_DPI, quality: int = 85) -> str:
     """Renders a PDF page to a base64-encoded JPEG string.
-    JPEG at 85% quality is ~10x smaller than PNG — faster API calls, same OCR accuracy.
+    Normal pages: quality=85 (~10x smaller than PNG — fast API calls).
+    Hard pages:   quality=95 (less JPEG artifacting on dense slide text).
     """
     mat = fitz.Matrix(dpi / 72, dpi / 72)
     pix = fitz_page.get_pixmap(matrix=mat)
-    return base64.b64encode(pix.tobytes("jpeg", jpg_quality=85)).decode("utf-8")
+    return base64.b64encode(pix.tobytes("jpeg", jpg_quality=quality)).decode("utf-8")
 
 
 def _load_ocr_cache(cache_path: str) -> Dict[int, str]:
@@ -114,12 +116,114 @@ def clear_ocr_cache_page(cache_path: str, page_num: int) -> bool:
     return True
 
 
+# --- OCR prompt constants ---
+# Normal pages: generic academic PDF prompt.
+_OCR_PROMPT_NORMAL = (
+    "This is a page from a university lecture PDF. "
+    "Extract ALL text exactly as written, including "
+    "math formulas, theorems, definitions, and notes. "
+    "Write formulas in plain text (e.g. f'(x) = 2x). "
+    "Do not add any commentary — only the extracted text."
+)
+
+# Hard pages (image-heavy, near-zero native text, detail=high):
+# Explicitly mentions boxes/diagrams and slide layout — targets gpt-4o-mini's
+# tendency to ignore text embedded in visual elements on dense slides.
+_OCR_PROMPT_HARD = (
+    "This is a lecture slide or image-heavy PDF page. "
+    "Extract every piece of visible text including headings, body text, "
+    "bullet points, labels, text inside boxes or diagrams, math expressions, "
+    "and any handwritten annotations. "
+    "Write each item on its own line. "
+    "Do not describe the images — output only the text you can read."
+)
+
+# Fallback: used on a single retry when the first hard-page OCR returns
+# empty or very short text. Maximally direct — removes any abstraction.
+_OCR_PROMPT_FALLBACK = (
+    "List every word and number visible anywhere in this image, line by line. "
+    "Include text inside boxes, arrows, diagrams, and overlaid labels. "
+    "Output only the text, nothing else."
+)
+
+
+_OCR_RATE_LIMIT_MAX_RETRIES = 3
+_OCR_RATE_LIMIT_BASE_WAIT = 2.0   # seconds; doubles each retry (2s → 4s → 8s)
+
+
+def _call_ocr_api(client, page_num: int, b64_image: str, detail: str, prompt: str, attempt: int) -> str:
+    """
+    Single OpenAI Vision call with automatic 429 retry (exponential backoff).
+    Returns extracted text, or empty string on unrecoverable failure.
+    """
+    last_exc = None
+    for rate_retry in range(_OCR_RATE_LIMIT_MAX_RETRIES):
+        try:
+            logger.info(
+                f"[extractor] OCR_REQUEST page={page_num} attempt={attempt} "
+                f"rate_retry={rate_retry} "
+                f"image_b64_len={len(b64_image)} "
+                f"model=gpt-4o-mini detail={detail!r} max_tokens=1500"
+            )
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{b64_image}",
+                                    "detail": detail,
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=1500,
+                timeout=settings.OCR_TIMEOUT,
+            )
+            raw = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            text = raw or ""
+            logger.info(
+                f"[extractor] OCR_RESPONSE page={page_num} attempt={attempt} "
+                f"finish_reason={finish_reason!r} "
+                f"raw_len={len(text)} "
+                f"raw_preview={text[:120]!r}"
+            )
+            return text
+
+        except Exception as exc:
+            exc_str = str(exc)
+            is_rate_limit = "429" in exc_str or "rate_limit" in exc_str.lower() or "rate limit" in exc_str.lower()
+            if is_rate_limit and rate_retry < _OCR_RATE_LIMIT_MAX_RETRIES - 1:
+                wait = _OCR_RATE_LIMIT_BASE_WAIT * (2 ** rate_retry)
+                logger.warning(
+                    f"[extractor] OCR_RATELIMIT page={page_num} attempt={attempt} "
+                    f"rate_retry={rate_retry} — waiting {wait:.0f}s before retry"
+                )
+                time.sleep(wait)
+                last_exc = exc
+                continue
+            raise exc
+
+    raise last_exc  # unreachable, but satisfies type checkers
+
+
 def _ocr_one(page_num: int, b64_image: str, detail: str = "auto") -> Tuple[int, str]:
     """
     Sends a pre-rendered page image to OpenAI Vision.
     Returns (page_num, extracted_text).
     Runs in a thread — fitz_page must NOT be passed here (not thread-safe).
-    detail="high" is used for hard pages (image-heavy, near-zero native text).
+
+    detail="auto"  → normal pages, uses _OCR_PROMPT_NORMAL (single attempt).
+    detail="high"  → hard pages (image-heavy, <50 chars native text).
+                     Uses _OCR_PROMPT_HARD on attempt 1.
+                     If result is empty or weak (<OCR_MIN_CHARS chars),
+                     retries ONCE with _OCR_PROMPT_FALLBACK + detail="high".
     """
     if not settings.OPENAI_API_KEY:
         logger.warning(f"[extractor] OCR skipped page {page_num} — no OPENAI_API_KEY")
@@ -129,59 +233,53 @@ def _ocr_one(page_num: int, b64_image: str, detail: str = "auto") -> Tuple[int, 
         from openai import OpenAI
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
-        logger.info(
-            f"[extractor] OCR_REQUEST page={page_num} "
-            f"image_b64_len={len(b64_image)} "
-            f"model=gpt-4o-mini detail={detail!r} max_tokens=1500"
-        )
+        is_hard = (detail == "high")
+        prompt = _OCR_PROMPT_HARD if is_hard else _OCR_PROMPT_NORMAL
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "This is a page from a university lecture PDF. "
-                                "Extract ALL text exactly as written, including "
-                                "math formulas, theorems, definitions, and notes. "
-                                "Write formulas in plain text (e.g. f'(x) = 2x). "
-                                "Do not add any commentary — only the extracted text."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{b64_image}",
-                                "detail": detail,
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=1500,
-            timeout=settings.OCR_TIMEOUT,
-        )
-        raw = response.choices[0].message.content
-        finish_reason = response.choices[0].finish_reason
-        text = raw or ""
-        logger.info(
-            f"[extractor] OCR_RESPONSE page={page_num} "
-            f"finish_reason={finish_reason!r} "
-            f"raw_len={len(text)} "
-            f"raw_preview={text[:120]!r}"
-        )
-        # Detect GPT refusal responses (model sometimes refuses image-only pages)
+        text = _call_ocr_api(client, page_num, b64_image, detail, prompt, attempt=1)
+
+        # --- Refusal / empty checks ---
         refusal_phrases = ["unable to extract", "can't extract", "cannot extract", "i'm unable"]
         if any(p in text.lower() for p in refusal_phrases):
-            logger.warning(f"[extractor] OCR_REFUSED page={page_num} — model refused, result discarded")
-            return page_num, ""
-        # Treat empty or whitespace-only response as a failure, not success
+            logger.warning(f"[extractor] OCR_REFUSED page={page_num} attempt=1 — model refused, result discarded")
+            text = ""
+
         if not text.strip():
-            logger.warning(f"[extractor] OCR_EMPTY page={page_num} — model returned empty text, treating as failure")
+            logger.warning(f"[extractor] OCR_EMPTY page={page_num} attempt=1 — model returned empty text")
+            text = ""
+
+        # --- Fallback retry for hard pages only ---
+        if is_hard and len(text.strip()) < OCR_MIN_CHARS:
+            logger.warning(
+                f"[extractor] OCR_WEAK page={page_num} attempt=1 "
+                f"chars={len(text.strip())} — retrying with fallback prompt"
+            )
+            text2 = _call_ocr_api(client, page_num, b64_image, "high", _OCR_PROMPT_FALLBACK, attempt=2)
+
+            if any(p in text2.lower() for p in refusal_phrases):
+                logger.warning(f"[extractor] OCR_REFUSED page={page_num} attempt=2 — model refused fallback")
+                text2 = ""
+
+            if text2.strip():
+                # Use whichever attempt produced more text
+                if len(text2.strip()) > len(text.strip()):
+                    logger.info(
+                        f"[extractor] OCR_FALLBACK_USED page={page_num} "
+                        f"attempt2_chars={len(text2.strip())} > attempt1_chars={len(text.strip())}"
+                    )
+                    text = text2
+                else:
+                    logger.info(
+                        f"[extractor] OCR_FALLBACK_KEPT_ORIGINAL page={page_num} "
+                        f"attempt1_chars={len(text.strip())} >= attempt2_chars={len(text2.strip())}"
+                    )
+            else:
+                logger.warning(f"[extractor] OCR_EMPTY page={page_num} attempt=2 — fallback also returned empty")
+
+        if not text.strip():
+            logger.warning(f"[extractor] OCR_FAILED_FINAL page={page_num} — all attempts returned no text")
             return page_num, ""
+
         logger.info(f"[extractor] OCR_SUCCESS page={page_num} chars={len(text)}")
         return page_num, text
 
@@ -248,7 +346,11 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
                         logger.warning(f"[extractor] OCR_CACHE_EMPTY page={i} — cached value is empty, re-queuing for OCR")
                         _is_hard = has_images and len(text) < OCR_MIN_CHARS
                         to_ocr[i] = (
-                            _render_page_b64(fitz_page, dpi=OCR_HARD_DPI if _is_hard else OCR_DPI),
+                            _render_page_b64(
+                                fitz_page,
+                                dpi=OCR_HARD_DPI if _is_hard else OCR_DPI,
+                                quality=95 if _is_hard else 85,
+                            ),
                             "high" if _is_hard else "auto",
                         )
                 else:
@@ -264,7 +366,10 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
                         f"[extractor] page {i} → {reason}, queuing for OCR "
                         f"[dpi={dpi} detail={ocr_detail!r}]"
                     )
-                    to_ocr[i] = (_render_page_b64(fitz_page, dpi=dpi), ocr_detail)
+                    to_ocr[i] = (
+                        _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85),
+                        ocr_detail,
+                    )
 
         doc.close()
 

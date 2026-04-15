@@ -49,13 +49,12 @@ def retrieve(
 
     logger.info(f"[retrieve:debug] RAW_HITS count={len(hits)}")
 
-    # Step 3: build results, filter by threshold
+    # Step 3: build results
+    # low_confidence=True flags results below threshold so the upstream agent
+    # can decide whether to use them. This service does not hard-filter them out.
     results: list[ChunkResult] = []
 
     for hit in hits:
-        if hit.score < settings.RETRIEVAL_SCORE_THRESHOLD:
-            continue
-
         payload = hit.payload or {}
         text = payload.get("text", "")
         if not text:
@@ -84,7 +83,7 @@ def retrieve(
     logger.info(f"[retrieve:debug] RESULTS_RETURNED count={len(results)}")
 
     if not results:
-        logger.info(f"[retrieve] all below threshold query='{req.query[:60]}'")
+        logger.info(f"[retrieve] no usable results query='{req.query[:60]}'")
         return RetrieveResponse(results=[])
 
     logger.info(

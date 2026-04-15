@@ -122,13 +122,12 @@ async def lifespan(app: FastAPI):
         logger.error(f"[startup] Qdrant collection setup failed: {e}")
         raise
 
-    # --- Pre-load local embedding model ---
-    if settings.EMBEDDING_PROVIDER == "local":
-        try:
-            from app.services.embedder import _get_local_model
-            _get_local_model()
-        except Exception as e:
-            logger.error(f"[startup] local model pre-load failed: {e}")
+    # Local embedding model support was removed — only "openai" is supported.
+    if settings.EMBEDDING_PROVIDER != "openai":
+        logger.warning(
+            f"[startup] EMBEDDING_PROVIDER={settings.EMBEDDING_PROVIDER!r} is not supported. "
+            f"Only 'openai' is available. Requests will fail until this is corrected."
+        )
 
 
     # --- Recover stuck files + auto re-index if collection was recreated ---
