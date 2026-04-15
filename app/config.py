@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     EMBEDDING_DIM: int = 1536
 
-    STORAGE_PATH: str = "./storage"
+    STORAGE_PATH: str = "/data/storage"
     MAX_FILE_SIZE_MB: int = 50
     MAX_PAGES: int = 300
     TOP_K_DEFAULT: int = 5
