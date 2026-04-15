@@ -37,8 +37,11 @@ OCR_IMAGE_PAGE_THRESHOLD = 300
 OCR_DPI = 96
 # Hard pages (image-heavy, near-zero native text) get 2× resolution + detail=high
 OCR_HARD_DPI = 192
-# Max parallel OCR requests to OpenAI
-OCR_MAX_WORKERS = 16
+# Max parallel OCR requests to OpenAI.
+# Keep this low — Railway's gpt-4o-mini quota is 200K TPM.
+# 16 workers saturates the limit instantly when a fresh 45-page doc is uploaded.
+# 4 workers staggers requests enough to stay within quota on first index.
+OCR_MAX_WORKERS = 4
 
 
 def _is_good_text(text: str) -> bool:
