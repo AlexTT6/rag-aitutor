@@ -37,7 +37,7 @@ from app.services.extractor import (
     _load_ocr_cache,
     _save_ocr_cache,
 )
-from app.services.vector_store import delete_by_file_id, insert_chunks
+from app.services.vector_store import delete_by_file_id, delete_by_qdrant_ids, insert_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +101,9 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
     combined = ocr_text if not native_text else f"{native_text}\n{ocr_text}"
     page_content = PageContent(page=page_num, text=combined, ocr_used=True)
 
-    # Delete existing Postgres chunk rows for this page, then flush so the
-    # COUNT below sees the updated state (prevents duplicate chunk_index on
-    # second call to ocr_single_page for the same page).
-    _delete_page_chunks(file_id, page_num, db)
+    # Delete existing Postgres chunk rows for this page AND their Qdrant vectors,
+    # then flush so the COUNT below sees the updated state.
+    deleted_count = _delete_page_chunks(file_id, page_num, db)
     db.flush()
 
     # Chunk → embed → index
@@ -145,7 +144,8 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
         for chunk, qid in zip(chunks, qdrant_ids)
     ]
     db.add_all(db_chunks)
-    db_file.chunk_count = (db_file.chunk_count or 0) + len(db_chunks)
+    # Adjust chunk_count: subtract the old page chunks we deleted, add the new ones.
+    db_file.chunk_count = max(0, (db_file.chunk_count or 0) - deleted_count) + len(db_chunks)
 
     _remove_from_empty_pages(db_file, page_num, db)
     db.commit()
@@ -220,9 +220,26 @@ def _remove_from_empty_pages(db_file: File, page_num: int, db: Session) -> None:
         db_file.ocr_completed = True
 
 
-def _delete_page_chunks(file_id: str, page_num: int, db: Session) -> None:
-    """Remove existing Postgres chunk rows for this page (Qdrant vectors stay — upsert handles them)."""
-    db.query(ChunkModel).filter(
+def _delete_page_chunks(file_id: str, page_num: int, db: Session) -> int:
+    """
+    Remove existing Postgres chunk rows and their Qdrant vectors for this page.
+    Returns the number of rows deleted (used to adjust chunk_count).
+    """
+    rows = db.query(ChunkModel).filter(
         ChunkModel.file_id == file_id,
         ChunkModel.page == page_num,
-    ).delete()
+    ).all()
+    if not rows:
+        return 0
+
+    qdrant_ids = [r.qdrant_id for r in rows if r.qdrant_id]
+    if qdrant_ids:
+        try:
+            delete_by_qdrant_ids(qdrant_ids)
+        except Exception as e:
+            logger.warning(f"[ocr_service] failed to delete Qdrant vectors for page={page_num}: {e}")
+
+    for row in rows:
+        db.delete(row)
+
+    return len(rows)

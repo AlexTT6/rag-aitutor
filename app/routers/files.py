@@ -26,6 +26,14 @@ router = APIRouter(prefix="/files", tags=["files"])
 _MAX_SIZE_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
 
+def _validate_uuid(file_id: str) -> None:
+    """Raise 422 if file_id is not a valid UUID, preventing a Postgres cast error (500)."""
+    try:
+        uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid file_id format: {file_id!r}")
+
+
 @router.post("/upload", response_model=FileUploadResponse, status_code=202)
 async def upload_file(
     file: UploadFile = File(...),
@@ -126,6 +134,7 @@ def get_file_status(
     OCR progress (ocr_pages_done / ocr_pages_total) is served from an
     in-memory store while status="ocr" — no DB round-trip needed.
     """
+    _validate_uuid(file_id)
     from app.services.ingestion import get_live_ocr_progress
     db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
     if not db_file:
@@ -152,6 +161,7 @@ def reindex_file(
     db: Session = Depends(get_db),
 ) -> dict:
     """Re-runs ingestion on an already-uploaded file. Useful after OCR improvements."""
+    _validate_uuid(file_id)
     from app.services.vector_store import delete_by_file_id
     db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
     if not db_file:
@@ -200,6 +210,7 @@ def ocr_page(
     Removes the page from the file's empty_pages list.
     Safe to call multiple times — re-OCRs the page if called again.
     """
+    _validate_uuid(file_id)
     from app.services.ocr_service import ocr_single_page
 
     page_num = body.get("page")
@@ -244,6 +255,7 @@ def ocr_missing(
     This endpoint is a no-op if ocr_completed is already True — call reindex
     first if you want to re-run OCR from scratch.
     """
+    _validate_uuid(file_id)
     from app.services.ocr_service import ocr_missing_pages
     from app.tasks.executor import submit_ingest
 
@@ -300,6 +312,7 @@ def delete_file(
     Rejected while status="processing" to avoid partial-delete races
     with the ingestion task.
     """
+    _validate_uuid(file_id)
     db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found.")

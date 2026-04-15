@@ -209,3 +209,15 @@ def delete_by_file_id(file_id: str) -> None:
             )
         ),
     )
+
+
+def delete_by_qdrant_ids(qdrant_ids: list[str]) -> None:
+    """Delete specific Qdrant points by their IDs. Used for targeted page re-OCR cleanup."""
+    if not qdrant_ids:
+        return
+    from qdrant_client.models import PointIdsList
+    client = get_client()
+    client.delete(
+        collection_name=settings.QDRANT_COLLECTION,
+        points_selector=PointIdsList(points=qdrant_ids),
+    )
