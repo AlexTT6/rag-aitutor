@@ -35,16 +35,45 @@ def run_ingestion(file_id: str, db: Session) -> None:
     try:
         # Phase: extract text from PDF (+ OCR if enabled)
         file.status = FileStatus.extracting
+        file.ocr_pages_done = None
+        file.ocr_pages_total = None
         db.commit()
         t0 = time.monotonic()
         ocr_cache_path = file.storage_path.replace(".pdf", "_ocr_cache.json")
+
+        def _ocr_progress(pages_done: int, pages_total: int) -> None:
+            """
+            Called by extract_pages when OCR starts (pages_done=0) and after
+            each page completes. Runs in the ingestion thread — DB access is safe.
+            """
+            if pages_done == 0:
+                # OCR is starting: flip status and record total.
+                file.status = FileStatus.ocr
+                file.ocr_pages_total = pages_total
+                file.ocr_pages_done = 0
+                logger.info(
+                    f"[ingestion] OCR starting file_id={file_id} "
+                    f"pages_to_ocr={pages_total}"
+                )
+            else:
+                file.ocr_pages_done = pages_done
+            try:
+                db.commit()
+            except Exception as cb_err:
+                logger.warning(f"[ingestion] progress commit failed: {cb_err}")
+                db.rollback()
+
         extraction = extract_pages(
             file.storage_path,
             ocr_cache_path=ocr_cache_path,
             ocr_enabled=settings.OCR_ENABLED,
+            progress_callback=_ocr_progress if settings.OCR_ENABLED else None,
         )
         file.total_page_count = extraction.total_page_count
         file.extractable_page_count = extraction.extractable_page_count
+        # Clear OCR progress fields now that extraction is complete.
+        file.ocr_pages_done = None
+        file.ocr_pages_total = None
         db.commit()
         logger.info(
             f"[ingestion] extract done file_id={file_id} "
@@ -79,10 +108,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
                 "neither native text nor OCR produced any content."
             )
 
-        # Phase: chunk
-        if extraction.ocr_page_count > 0:
-            file.status = FileStatus.ocr
-            db.commit()
+        # Phase: chunk (fast — usually <1 second)
         file.status = FileStatus.chunking
         db.commit()
         t0 = time.monotonic()

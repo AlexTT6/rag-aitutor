@@ -291,7 +291,12 @@ def _ocr_one(page_num: int, b64_image: str, detail: str = "auto") -> Tuple[int, 
         return page_num, ""
 
 
-def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabled: bool = True) -> ExtractionResult:
+def extract_pages(
+    pdf_path: str,
+    ocr_cache_path: Optional[str] = None,
+    ocr_enabled: bool = True,
+    progress_callback: Optional[callable] = None,
+) -> ExtractionResult:
     """
     Extracts text from every PDF page.
 
@@ -382,16 +387,32 @@ def extract_pages(pdf_path: str, ocr_cache_path: Optional[str] = None, ocr_enabl
         # --- Pass 2: OCR in parallel (only uncached pages) ---
         ocr_results = {}
         if to_ocr:
-            logger.info(f"[extractor] running OCR on {len(to_ocr)} pages in parallel")
+            ocr_total = len(to_ocr)
+            logger.info(f"[extractor] running OCR on {ocr_total} pages in parallel")
+
+            # Notify caller that OCR is starting (pages_done=0, pages_total=N)
+            if progress_callback:
+                try:
+                    progress_callback(0, ocr_total)
+                except Exception:
+                    pass
+
             with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as pool:
                 futures = {
                     pool.submit(_ocr_one, page_num, b64, detail): page_num
                     for page_num, (b64, detail) in to_ocr.items()
                 }
+                ocr_done = 0
                 for future in as_completed(futures):
                     page_num, text = future.result()
                     if text.strip():                    # only store successful results
                         ocr_results[page_num] = text
+                    ocr_done += 1
+                    if progress_callback:
+                        try:
+                            progress_callback(ocr_done, ocr_total)
+                        except Exception:
+                            pass
 
             # Persist new results to cache — empty strings are never written
             if ocr_cache_path:

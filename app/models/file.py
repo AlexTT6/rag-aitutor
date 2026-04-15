@@ -48,6 +48,12 @@ class File(Base):
     error_message = Column(Text, nullable=True)
     chunk_count = Column(Integer, nullable=False, default=0)
 
+    # OCR progress — populated only while status="ocr", NULL otherwise.
+    # ocr_pages_total: how many pages need Vision OCR this run.
+    # ocr_pages_done:  how many have completed (success or failure).
+    ocr_pages_total = Column(Integer, nullable=True)
+    ocr_pages_done = Column(Integer, nullable=True)
+
     uploaded_at = Column(
         DateTime(timezone=True),
         nullable=False,

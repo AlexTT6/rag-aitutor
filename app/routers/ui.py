@@ -586,7 +586,12 @@ async function pollOnce() {
         chunking: '✂️', embedding: '🧠', indexed: '✅', failed: '❌'
       };
       const emoji = statusEmoji[data.status] || '⏳';
-      addLog(`${emoji} ${data.status}`, 'info');
+      let msg = `${emoji} ${data.status}`;
+      if (data.status === 'ocr' && data.ocr_pages_total != null) {
+        const done = data.ocr_pages_done ?? 0;
+        msg += ` (${done}/${data.ocr_pages_total} pages)`;
+      }
+      addLog(msg, 'info');
     }
   } catch (e) {
     addLog('error: ' + e.message, 'err');
@@ -596,9 +601,23 @@ async function pollOnce() {
 function renderPollResult(data) {
   const statusClass = data.status;
   const progressClass = data.status === 'indexed' ? 'done' : data.status === 'failed' ? 'failed' : '';
+
+  let ocrProgress = '';
+  if (data.status === 'ocr' && data.ocr_pages_total != null) {
+    const done = data.ocr_pages_done ?? 0;
+    const total = data.ocr_pages_total;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    ocrProgress = `
+      <div class="row-item">
+        <span class="key">OCR progress</span>
+        <span class="val" style="color:#a855f7">${done} / ${total} pages (${pct}%)</span>
+      </div>`;
+  }
+
   document.getElementById('pollResult').innerHTML = `
     <div class="info-box" style="margin-top:12px">
       <div class="row-item"><span class="key">Status</span><span class="val"><span class="status-pill ${statusClass}">${data.status}</span></span></div>
+      ${ocrProgress}
       ${data.chunk_count != null ? `<div class="row-item"><span class="key">Chunks indexed</span><span class="val" style="color:var(--success)">${data.chunk_count}</span></div>` : ''}
       ${data.error_message ? `<div class="row-item"><span class="key">Error</span><span class="val" style="color:var(--error)">${escHtml(data.error_message)}</span></div>` : ''}
       ${data.indexed_at ? `<div class="row-item"><span class="key">Indexed at</span><span class="val">${new Date(data.indexed_at).toLocaleString()}</span></div>` : ''}

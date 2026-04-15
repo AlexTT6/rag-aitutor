@@ -25,10 +25,14 @@ class FileStatusResponse(BaseModel):
     indexed_at: Optional[datetime]
     file_exists: bool = True   # False when the PDF was lost from disk (e.g. after redeploy)
 
+    # OCR progress — only non-None while status="ocr".
+    # ocr_pages_total: pages queued for Vision OCR this run.
+    # ocr_pages_done:  pages completed so far (success or failure).
+    ocr_pages_total: Optional[int] = None
+    ocr_pages_done: Optional[int] = None
+
     model_config = {"from_attributes": True}
 
-    # Pydantic doesn't know that ORM field `id` maps to `file_id`.
-    # We handle this with a validator below.
     @classmethod
     def from_orm_file(cls, f) -> "FileStatusResponse":
         import os
@@ -44,6 +48,8 @@ class FileStatusResponse(BaseModel):
             uploaded_at=f.uploaded_at,
             indexed_at=f.indexed_at,
             file_exists=os.path.exists(f.storage_path),
+            ocr_pages_total=getattr(f, "ocr_pages_total", None),
+            ocr_pages_done=getattr(f, "ocr_pages_done", None),
         )
 
 

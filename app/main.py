@@ -113,6 +113,23 @@ async def lifespan(app: FastAPI):
         logger.error(f"[startup] DB schema creation failed: {e}")
         raise
 
+    # --- Backward-compatible column additions ---
+    # create_all() won't ALTER existing tables, so we do it explicitly.
+    # IF NOT EXISTS makes each statement safe to run on every startup.
+    _new_columns = [
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS ocr_pages_total INTEGER",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS ocr_pages_done  INTEGER",
+    ]
+    try:
+        with engine.connect() as _conn:
+            for _ddl in _new_columns:
+                _conn.execute(text(_ddl))
+            _conn.commit()
+        logger.info("[startup] DB column migrations applied")
+    except Exception as e:
+        # Non-fatal: SQLite uses different syntax; columns may already exist.
+        logger.debug(f"[startup] DB column migration skipped: {e}")
+
     # --- Qdrant collection ---
     collection_recreated = False
     try:
