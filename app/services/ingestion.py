@@ -42,66 +42,40 @@ def run_ingestion(file_id: str, db: Session) -> None:
     qdrant_vectors_written = False
 
     try:
-        # Phase: extract text from PDF (+ OCR if enabled)
+        # Phase: extract native text only — no OCR, no Vision API calls.
+        # Pages with < 50 chars are recorded in file.empty_pages for on-demand OCR later.
         file.status = FileStatus.extracting
         file.ocr_pages_done = None
         file.ocr_pages_total = None
         db.commit()
         t0 = time.monotonic()
-        ocr_cache_path = file.storage_path.replace(".pdf", "_ocr_cache.json")
-
-        def _ocr_progress(pages_done: int, pages_total: int) -> None:
-            """
-            Called by extract_pages when OCR starts (pages_done=0) and after
-            each page completes. In-memory only — no DB commit needed here.
-            Status is flipped to FileStatus.ocr in the DB exactly once when
-            OCR starts, then progress is tracked in _live_ocr until done.
-            """
-            _live_ocr[file_id] = (pages_done, pages_total)
-            if pages_done == 0:
-                # OCR is starting: flip DB status once.
-                file.status = FileStatus.ocr
-                try:
-                    db.commit()
-                except Exception as cb_err:
-                    logger.warning(f"[ingestion] ocr status commit failed: {cb_err}")
-                    db.rollback()
-                logger.info(
-                    f"[ingestion] OCR starting file_id={file_id} "
-                    f"pages_to_ocr={pages_total}"
-                )
 
         extraction = extract_pages(
             file.storage_path,
-            ocr_cache_path=ocr_cache_path,
-            ocr_enabled=settings.OCR_ENABLED,
-            progress_callback=_ocr_progress if settings.OCR_ENABLED else None,
+            ocr_cache_path=None,
+            ocr_enabled=False,   # always native-only during bulk ingestion
+            progress_callback=None,
         )
-        # OCR done — remove live progress entry.
-        _live_ocr.pop(file_id, None)
 
         file.total_page_count = extraction.total_page_count
         file.extractable_page_count = extraction.extractable_page_count
+        file.empty_pages = extraction.empty_page_numbers   # candidate pages for on-demand OCR
+        file.ocr_completed = False
         db.commit()
+
         logger.info(
             f"[ingestion] extract done file_id={file_id} "
             f"pages={extraction.total_page_count} "
             f"extractable={extraction.extractable_page_count} "
-            f"ocr_pages={extraction.ocr_page_count} "
-            f"ocr_enabled={settings.OCR_ENABLED} "
+            f"empty_pages={len(extraction.empty_page_numbers)} "
             f"elapsed={time.monotonic()-t0:.1f}s"
         )
         _total_chars = sum(len(p.text) for p in extraction.pages)
-        _ocr_chars = sum(len(p.text) for p in extraction.pages if p.ocr_used)
         logger.info(
             f"[ingestion:debug] FILE filename={file.filename!r} "
-            f"total_pages={extraction.total_page_count}"
-        )
-        logger.info(
-            f"[ingestion:debug] EXTRACTION "
+            f"total_pages={extraction.total_page_count} "
             f"total_chars={_total_chars} "
-            f"ocr_used={'yes' if extraction.ocr_page_count > 0 else 'no'} "
-            f"ocr_chars={_ocr_chars}"
+            f"empty_pages={extraction.empty_page_numbers}"
         )
 
         if extraction.total_page_count > settings.MAX_PAGES:

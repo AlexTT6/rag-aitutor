@@ -75,6 +75,13 @@ class ExtractionResult:
     total_page_count: int
     extractable_page_count: int
     ocr_page_count: int = 0
+    # 1-indexed page numbers that had < OCR_MIN_CHARS native text.
+    # These are candidates for on-demand OCR.
+    empty_page_numbers: List[int] = None
+
+    def __post_init__(self):
+        if self.empty_page_numbers is None:
+            self.empty_page_numbers = []
 
 
 def _render_page_b64(fitz_page: fitz.Page, dpi: int = OCR_DPI, quality: int = 85) -> str:
@@ -342,11 +349,16 @@ def extract_pages(
     # page_num → (base64 JPEG, detail level) — only for image-only pages not in cache
     to_ocr: Dict[int, Tuple[str, str]] = {}
 
+    empty_page_numbers: List[int] = []   # pages with < OCR_MIN_CHARS native text
+
     if not ocr_enabled:
         # OCR disabled — extract native text only, no rendering, no API calls
         logger.info("[extractor] OCR disabled — native text only")
         for i, fitz_page in enumerate(doc, start=1):
-            native[i] = fitz_page.get_text("text").strip()
+            text = fitz_page.get_text("text").strip()
+            native[i] = text
+            if not _is_good_text(text):
+                empty_page_numbers.append(i)
         doc.close()
         ocr_cache: Dict[int, str] = {}
         ocr_results: Dict[int, str] = {}
@@ -359,6 +371,8 @@ def extract_pages(
         for i, fitz_page in enumerate(doc, start=1):
             text = fitz_page.get_text("text").strip()
             native[i] = text
+            if not _is_good_text(text):
+                empty_page_numbers.append(i)
 
             # Fast path: page already has a valid OCR result cached.
             if i in ocr_cache and ocr_cache[i].strip():
@@ -490,4 +504,5 @@ def extract_pages(
         total_page_count=total,
         extractable_page_count=len(pages),
         ocr_page_count=ocr_count,
+        empty_page_numbers=empty_page_numbers,
     )

@@ -119,6 +119,8 @@ async def lifespan(app: FastAPI):
     _new_columns = [
         "ALTER TABLE files ADD COLUMN IF NOT EXISTS ocr_pages_total INTEGER",
         "ALTER TABLE files ADD COLUMN IF NOT EXISTS ocr_pages_done  INTEGER",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS empty_pages      JSONB",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS ocr_completed    BOOLEAN NOT NULL DEFAULT FALSE",
     ]
     try:
         with engine.connect() as _conn:

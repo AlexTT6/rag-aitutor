@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text
 from app.database import GUID
 from sqlalchemy.orm import relationship
 
@@ -53,6 +53,15 @@ class File(Base):
     # ocr_pages_done:  how many have completed (success or failure).
     ocr_pages_total = Column(Integer, nullable=True)
     ocr_pages_done = Column(Integer, nullable=True)
+
+    # Demand-driven OCR fields.
+    # empty_pages: list of 1-indexed page numbers that had < 50 chars native text
+    #              at index time. Populated on every (re)index. Pages are removed
+    #              from this list as they are OCR'd on demand.
+    # ocr_completed: True once ocr/missing has been run to completion for this file.
+    #                Prevents repeated full-OCR triggers on the same file.
+    empty_pages = Column(JSON, nullable=True)       # e.g. [5, 12, 78]
+    ocr_completed = Column(Boolean, nullable=False, default=False)
 
     uploaded_at = Column(
         DateTime(timezone=True),

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -26,10 +26,14 @@ class FileStatusResponse(BaseModel):
     file_exists: bool = True   # False when the PDF was lost from disk (e.g. after redeploy)
 
     # OCR progress — only non-None while status="ocr".
-    # ocr_pages_total: pages queued for Vision OCR this run.
-    # ocr_pages_done:  pages completed so far (success or failure).
     ocr_pages_total: Optional[int] = None
     ocr_pages_done: Optional[int] = None
+
+    # Demand-driven OCR fields.
+    # empty_pages: page numbers with no native text — candidates for on-demand OCR.
+    # ocr_completed: True once POST /files/{id}/ocr/missing has run to completion.
+    empty_pages: Optional[List[int]] = None
+    ocr_completed: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -50,6 +54,8 @@ class FileStatusResponse(BaseModel):
             file_exists=os.path.exists(f.storage_path),
             ocr_pages_total=getattr(f, "ocr_pages_total", None),
             ocr_pages_done=getattr(f, "ocr_pages_done", None),
+            empty_pages=getattr(f, "empty_pages", None),
+            ocr_completed=getattr(f, "ocr_completed", False) or False,
         )
 
 

@@ -25,3 +25,7 @@ class ChunkResult(BaseModel):
 
 class RetrieveResponse(BaseModel):
     results: List[ChunkResult]
+    # True when at least one file in the queried course has pages not yet OCR'd.
+    # The agent should use this as a signal: if results are weak AND this is True,
+    # calling POST /files/{id}/ocr/missing may improve future retrieval.
+    has_unindexed_pages: bool = False

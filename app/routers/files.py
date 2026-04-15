@@ -178,6 +178,104 @@ def reindex_file(
     return {"file_id": file_id, "status": "reindexing", "message": "Re-indexing started."}
 
 
+@router.post("/{file_id}/ocr/page", status_code=200)
+def ocr_page(
+    file_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    OCR a single page on demand and merge it into the existing index.
+
+    Body: {"page": 78}
+
+    Synchronous — returns when OCR is complete (~3–5 seconds).
+    Removes the page from the file's empty_pages list.
+    Safe to call multiple times — re-OCRs the page if called again.
+    """
+    from app.services.ocr_service import ocr_single_page
+
+    page_num = body.get("page")
+    if not isinstance(page_num, int) or page_num < 1:
+        raise HTTPException(status_code=400, detail="'page' must be a positive integer.")
+
+    db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if db_file.status in _IN_PROGRESS_STATUSES:
+        raise HTTPException(status_code=409, detail="File is currently being indexed.")
+
+    try:
+        text = ocr_single_page(file_id, page_num, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "file_id": file_id,
+        "page": page_num,
+        "ocr_text_length": len(text),
+        "indexed": bool(text.strip()),
+        "message": (
+            f"Page {page_num} OCR'd and added to index."
+            if text.strip()
+            else f"Page {page_num} OCR'd but produced no text."
+        ),
+    }
+
+
+@router.post("/{file_id}/ocr/missing", status_code=202)
+def ocr_missing(
+    file_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Trigger background OCR for all pages that had no native text at index time.
+
+    Returns 202 immediately. OCR runs in the background thread pool.
+    When complete, file.ocr_completed is set to True.
+
+    This endpoint is a no-op if ocr_completed is already True — call reindex
+    first if you want to re-run OCR from scratch.
+    """
+    from app.services.ocr_service import ocr_missing_pages
+    from app.tasks.executor import submit_ingest
+
+    db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if db_file.status in _IN_PROGRESS_STATUSES:
+        raise HTTPException(status_code=409, detail="File is currently being indexed.")
+    if db_file.ocr_completed:
+        return {"file_id": file_id, "status": "already_completed", "message": "OCR was already run for this file."}
+
+    pages = list(db_file.empty_pages or [])
+    if not pages:
+        db_file.ocr_completed = True
+        db.commit()
+        return {"file_id": file_id, "status": "nothing_to_ocr", "pages_count": 0}
+
+    def _run_ocr_missing():
+        from app.database import SessionLocal
+        _db = SessionLocal()
+        try:
+            ocr_missing_pages(file_id, _db)
+        except Exception as e:
+            logger.error(f"[files] ocr_missing background failed file_id={file_id}: {e}")
+        finally:
+            _db.close()
+
+    import threading
+    t = threading.Thread(target=_run_ocr_missing, daemon=True, name=f"ocr-missing-{file_id[:8]}")
+    t.start()
+
+    return {
+        "file_id": file_id,
+        "status": "started",
+        "pages_count": len(pages),
+        "message": f"OCR started for {len(pages)} pages. Poll GET /files/{file_id} to monitor.",
+    }
+
+
 @router.delete("/{file_id}", response_model=FileDeleteResponse)
 def delete_file(
     file_id: str,

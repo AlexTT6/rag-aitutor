@@ -38,7 +38,7 @@ def embed_query(query: str) -> list[float]:
     return vector
 
 
-_openai_client: OpenAI | None = None
+_openai_client: "OpenAI | None" = None
 _openai_client_lock = threading.Lock()
 
 

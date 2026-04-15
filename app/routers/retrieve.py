@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.models.file import File as FileModel
 from app.schemas.retrieve import ChunkResult, RetrieveRequest, RetrieveResponse
 from app.services.embedder import embed_query
 from app.services.vector_store import search_chunks
@@ -43,9 +44,16 @@ def retrieve(
     # Step 2: vector search
     hits = search_chunks(query_vector, str(req.course_id), top_k)
 
+    # Check if any file in this course has unindexed pages (for agent awareness)
+    has_unindexed = db.query(FileModel).filter(
+        FileModel.course_id == str(req.course_id),
+        FileModel.ocr_completed == False,   # noqa: E712
+        FileModel.empty_pages != None,       # noqa: E711
+    ).first() is not None
+
     if not hits:
         logger.info(f"[retrieve] no results query='{req.query[:60]}'")
-        return RetrieveResponse(results=[])
+        return RetrieveResponse(results=[], has_unindexed_pages=has_unindexed)
 
     logger.info(f"[retrieve:debug] RAW_HITS count={len(hits)}")
 
@@ -91,4 +99,4 @@ def retrieve(
         f"best={max(r.score for r in results):.3f} "
         f"query='{req.query[:60]}'"
     )
-    return RetrieveResponse(results=results)
+    return RetrieveResponse(results=results, has_unindexed_pages=has_unindexed)
