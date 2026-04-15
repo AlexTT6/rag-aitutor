@@ -1,11 +1,16 @@
 import logging
 import os
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.tasks.executor import active_job_count, submit_ingest, MAX_CONCURRENT_JOBS
+
+# Limit concurrent ocr/missing background jobs to the same cap as the main executor.
+# Prevents unbounded thread spawning when multiple clients call ocr/missing in parallel.
+_ocr_missing_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +175,8 @@ def reindex_file(
     db_file.error_message = None
     db_file.chunk_count = 0
     db_file.indexed_at = None
+    db_file.empty_pages = None      # cleared by new ingestion run
+    db_file.ocr_completed = False   # allow ocr/missing after reindex
     db.commit()
 
     if not submit_ingest(file_id):
@@ -255,6 +262,9 @@ def ocr_missing(
         return {"file_id": file_id, "status": "nothing_to_ocr", "pages_count": 0}
 
     def _run_ocr_missing():
+        if not _ocr_missing_semaphore.acquire(blocking=False):
+            logger.warning(f"[files] ocr_missing rejected file_id={file_id} — semaphore full")
+            return
         from app.database import SessionLocal
         _db = SessionLocal()
         try:
@@ -263,8 +273,8 @@ def ocr_missing(
             logger.error(f"[files] ocr_missing background failed file_id={file_id}: {e}")
         finally:
             _db.close()
+            _ocr_missing_semaphore.release()
 
-    import threading
     t = threading.Thread(target=_run_ocr_missing, daemon=True, name=f"ocr-missing-{file_id[:8]}")
     t.start()
 

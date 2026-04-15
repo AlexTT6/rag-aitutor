@@ -67,18 +67,17 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
 
     t0 = time.monotonic()
     doc = fitz.open(db_file.storage_path)
-    total_pages = len(doc)
-
-    if page_num < 1 or page_num > total_pages:
-        doc.close()
-        raise ValueError(f"Page {page_num} out of range (1–{total_pages})")
-
-    fitz_page = doc[page_num - 1]   # fitz is 0-indexed
-    native_text = fitz_page.get_text("text").strip()
-    is_hard = len(native_text) < OCR_MIN_CHARS
-    dpi = OCR_HARD_DPI if is_hard else OCR_DPI
-    b64 = _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85)
-    doc.close()
+    try:
+        total_pages = len(doc)
+        if page_num < 1 or page_num > total_pages:
+            raise ValueError(f"Page {page_num} out of range (1–{total_pages})")
+        fitz_page = doc[page_num - 1]   # fitz is 0-indexed
+        native_text = fitz_page.get_text("text").strip()
+        is_hard = len(native_text) < OCR_MIN_CHARS
+        dpi = OCR_HARD_DPI if is_hard else OCR_DPI
+        b64 = _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85)
+    finally:
+        doc.close()   # always release — even if render raises
 
     logger.info(
         f"[ocr_service] OCR_SINGLE file_id={file_id} page={page_num} "
@@ -102,8 +101,11 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
     combined = ocr_text if not native_text else f"{native_text}\n{ocr_text}"
     page_content = PageContent(page=page_num, text=combined, ocr_used=True)
 
-    # Delete existing chunks for this page from Qdrant + Postgres
+    # Delete existing Postgres chunk rows for this page, then flush so the
+    # COUNT below sees the updated state (prevents duplicate chunk_index on
+    # second call to ocr_single_page for the same page).
     _delete_page_chunks(file_id, page_num, db)
+    db.flush()
 
     # Chunk → embed → index
     chunks = chunk_document([page_content])
@@ -114,7 +116,7 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
     texts = [c.text for c in chunks]
     embeddings = get_embeddings(texts)
 
-    # Compute new chunk_index offset — start after existing max
+    # Chunk index = current count after deletion flush
     max_idx = db.query(ChunkModel).filter(
         ChunkModel.file_id == file_id
     ).count()
@@ -206,14 +208,16 @@ def ocr_missing_pages(file_id: str, db: Session) -> int:
 # ---------------------------------------------------------------------------
 
 def _remove_from_empty_pages(db_file: File, page_num: int, db: Session) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
     current = list(db_file.empty_pages or [])
     if page_num in current:
         current.remove(page_num)
-        db_file.empty_pages = current
-        # SQLAlchemy won't detect in-place list mutations on JSON columns —
-        # flag the attribute as modified explicitly.
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(db_file, "empty_pages")
+    # Store None (not []) when empty — keeps has_unindexed_pages query correct
+    db_file.empty_pages = current if current else None
+    flag_modified(db_file, "empty_pages")
+    # If all pages have been individually OCR'd, mark as completed
+    if not current:
+        db_file.ocr_completed = True
 
 
 def _delete_page_chunks(file_id: str, page_num: int, db: Session) -> None:

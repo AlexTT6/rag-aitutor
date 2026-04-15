@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -167,14 +168,11 @@ _OCR_RATE_LIMIT_BASE_WAIT = 2.0   # seconds; doubles each retry (2s → 4s → 8
 # Module-level OpenAI client singleton — avoids creating a new httpx session
 # for each OCR page. The client is thread-safe: multiple OCR workers share it.
 _ocr_client = None
-_ocr_client_lock = None
+_ocr_client_lock = threading.Lock()   # must be module-level — lazy init was not thread-safe
 
 
 def _get_ocr_client():
-    global _ocr_client, _ocr_client_lock
-    if _ocr_client_lock is None:
-        import threading
-        _ocr_client_lock = threading.Lock()
+    global _ocr_client
     if _ocr_client is None:
         with _ocr_client_lock:
             if _ocr_client is None:
