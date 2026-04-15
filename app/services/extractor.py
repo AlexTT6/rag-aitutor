@@ -337,6 +337,15 @@ def extract_pages(
         for i, fitz_page in enumerate(doc, start=1):
             text = fitz_page.get_text("text").strip()
             native[i] = text
+
+            # Fast path: page already has a valid OCR result cached.
+            # Skip get_images() entirely — no need to re-evaluate, saves
+            # significant time on image-heavy PDFs during reindex.
+            if i in ocr_cache and ocr_cache[i].strip():
+                cache_hits += 1
+                logger.debug(f"[extractor] page {i} → OCR cache hit")
+                continue
+
             has_images = len(fitz_page.get_images()) > 0
 
             needs_ocr = (
@@ -345,8 +354,9 @@ def extract_pages(
             )
             if needs_ocr:
                 if i in ocr_cache:
+                    # Cache entry exists but is empty — stale, re-queue
                     if ocr_cache[i].strip():
-                        # Valid cache hit — skip rendering and API call entirely
+                        # Shouldn't reach here (handled above), but keep safe
                         cache_hits += 1
                         logger.debug(f"[extractor] page {i} → OCR cache hit")
                     else:

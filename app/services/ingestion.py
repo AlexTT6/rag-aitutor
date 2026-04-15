@@ -2,7 +2,6 @@ import logging
 import time
 from datetime import datetime, timezone
 
-import tiktoken
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -14,8 +13,6 @@ from app.services.extractor import extract_pages
 from app.services.vector_store import delete_by_file_id, insert_chunks
 
 logger = logging.getLogger(__name__)
-
-_tokenizer = tiktoken.get_encoding("cl100k_base")
 
 
 def run_ingestion(file_id: str, db: Session) -> None:
@@ -123,7 +120,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"chunks={len(chunks)} "
             f"elapsed={time.monotonic()-t0:.1f}s"
         )
-        _token_counts = [len(_tokenizer.encode(c.text)) for c in chunks]
+        _token_counts = [c.token_count for c in chunks]   # already computed in chunker
         _avg_tokens = sum(_token_counts) / len(_token_counts)
         _sample_indices = [0, len(chunks) // 2, len(chunks) - 1]
         logger.info(
@@ -189,7 +186,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
                 page=chunk.page,
                 chunk_index=chunk.chunk_index,
                 text=chunk.text,
-                token_count=len(_tokenizer.encode(chunk.text)),
+                token_count=chunk.token_count,   # already computed in chunker
                 qdrant_id=qid,
             )
             for chunk, qid in zip(chunks, qdrant_ids)

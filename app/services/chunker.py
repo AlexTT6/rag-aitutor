@@ -36,6 +36,7 @@ class Chunk:
     page: int
     chunk_index: int   # global order across the whole document
     text: str
+    token_count: int = 0  # set during chunking — avoids re-tokenizing in ingestion
 
 
 def _token_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
@@ -108,7 +109,7 @@ def chunk_document(pages: List[PageContent]) -> List[Chunk]:
 
         # --- substep 5: filter + metadata construction ---
         t0 = time.monotonic()
-        for raw in decoded:
+        for window, raw in zip(windows, decoded):
             cleaned = raw.strip()
             if len(cleaned) >= MIN_CHARS:
                 all_chunks.append(
@@ -116,6 +117,7 @@ def chunk_document(pages: List[PageContent]) -> List[Chunk]:
                         page=page_content.page,
                         chunk_index=len(all_chunks),
                         text=cleaned,
+                        token_count=len(window),  # already computed — no extra encode()
                     )
                 )
         t_filter += time.monotonic() - t0
