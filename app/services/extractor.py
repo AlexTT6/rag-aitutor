@@ -154,6 +154,24 @@ _OCR_PROMPT_FALLBACK = (
 _OCR_RATE_LIMIT_MAX_RETRIES = 3
 _OCR_RATE_LIMIT_BASE_WAIT = 2.0   # seconds; doubles each retry (2s → 4s → 8s)
 
+# Module-level OpenAI client singleton — avoids creating a new httpx session
+# for each OCR page. The client is thread-safe: multiple OCR workers share it.
+_ocr_client = None
+_ocr_client_lock = None
+
+
+def _get_ocr_client():
+    global _ocr_client, _ocr_client_lock
+    if _ocr_client_lock is None:
+        import threading
+        _ocr_client_lock = threading.Lock()
+    if _ocr_client is None:
+        with _ocr_client_lock:
+            if _ocr_client is None:
+                from openai import OpenAI
+                _ocr_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    return _ocr_client
+
 
 def _call_ocr_api(client, page_num: int, b64_image: str, detail: str, prompt: str, attempt: int) -> str:
     """
@@ -235,8 +253,7 @@ def _ocr_one(page_num: int, b64_image: str, detail: str = "auto") -> Tuple[int, 
         return page_num, ""
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client = _get_ocr_client()
 
         is_hard = (detail == "high")
         prompt = _OCR_PROMPT_HARD if is_hard else _OCR_PROMPT_NORMAL

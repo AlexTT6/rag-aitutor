@@ -38,8 +38,27 @@ def embed_query(query: str) -> list[float]:
     return vector
 
 
+_openai_client: OpenAI | None = None
+_openai_client_lock = threading.Lock()
+
+
+def _get_openai_client() -> OpenAI:
+    """Returns a module-level singleton OpenAI client.
+
+    Creating OpenAI() on every call sets up a new httpx session + SSL handshake.
+    Reusing one client keeps the HTTP/2 connection alive between requests.
+    Thread-safe: the underlying httpx session is designed for concurrent use.
+    """
+    global _openai_client
+    if _openai_client is None:
+        with _openai_client_lock:
+            if _openai_client is None:
+                _openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    return _openai_client
+
+
 def _openai_embed(texts: list[str]) -> list[list[float]]:
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    client = _get_openai_client()
     all_embeddings: list[list[float]] = []
 
     for i in range(0, len(texts), 100):
