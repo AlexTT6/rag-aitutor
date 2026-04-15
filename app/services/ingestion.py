@@ -1,8 +1,20 @@
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
 
 from sqlalchemy.orm import Session
+
+# --- Live OCR progress (in-memory) ---
+# Updated by the ingestion thread; read by the GET /files/{id} endpoint.
+# CPython's GIL makes plain dict reads/writes thread-safe for this use case.
+# Entries are removed when OCR finishes or the ingestion fails.
+_live_ocr: Dict[str, Tuple[int, int]] = {}   # file_id → (pages_done, pages_total)
+
+
+def get_live_ocr_progress(file_id: str) -> Optional[Tuple[int, int]]:
+    """Returns (pages_done, pages_total) while a file is actively OCR-ing, else None."""
+    return _live_ocr.get(file_id)
 
 from app.config import settings
 from app.models.chunk import Chunk as ChunkModel
@@ -41,24 +53,23 @@ def run_ingestion(file_id: str, db: Session) -> None:
         def _ocr_progress(pages_done: int, pages_total: int) -> None:
             """
             Called by extract_pages when OCR starts (pages_done=0) and after
-            each page completes. Runs in the ingestion thread — DB access is safe.
+            each page completes. In-memory only — no DB commit needed here.
+            Status is flipped to FileStatus.ocr in the DB exactly once when
+            OCR starts, then progress is tracked in _live_ocr until done.
             """
+            _live_ocr[file_id] = (pages_done, pages_total)
             if pages_done == 0:
-                # OCR is starting: flip status and record total.
+                # OCR is starting: flip DB status once.
                 file.status = FileStatus.ocr
-                file.ocr_pages_total = pages_total
-                file.ocr_pages_done = 0
+                try:
+                    db.commit()
+                except Exception as cb_err:
+                    logger.warning(f"[ingestion] ocr status commit failed: {cb_err}")
+                    db.rollback()
                 logger.info(
                     f"[ingestion] OCR starting file_id={file_id} "
                     f"pages_to_ocr={pages_total}"
                 )
-            else:
-                file.ocr_pages_done = pages_done
-            try:
-                db.commit()
-            except Exception as cb_err:
-                logger.warning(f"[ingestion] progress commit failed: {cb_err}")
-                db.rollback()
 
         extraction = extract_pages(
             file.storage_path,
@@ -66,11 +77,11 @@ def run_ingestion(file_id: str, db: Session) -> None:
             ocr_enabled=settings.OCR_ENABLED,
             progress_callback=_ocr_progress if settings.OCR_ENABLED else None,
         )
+        # OCR done — remove live progress entry.
+        _live_ocr.pop(file_id, None)
+
         file.total_page_count = extraction.total_page_count
         file.extractable_page_count = extraction.extractable_page_count
-        # Clear OCR progress fields now that extraction is complete.
-        file.ocr_pages_done = None
-        file.ocr_pages_total = None
         db.commit()
         logger.info(
             f"[ingestion] extract done file_id={file_id} "
@@ -205,6 +216,7 @@ def run_ingestion(file_id: str, db: Session) -> None:
         )
 
     except Exception as e:
+        _live_ocr.pop(file_id, None)  # clean up progress entry on failure
         logger.exception(f"[ingestion] FAILED file_id={file_id}: {e}")
         db.rollback()
 

@@ -118,12 +118,18 @@ def get_file_status(
 ) -> FileStatusResponse:
     """
     Returns the current status and metadata for a file.
-    Used by the agent to poll ingestion progress.
+    OCR progress (ocr_pages_done / ocr_pages_total) is served from an
+    in-memory store while status="ocr" — no DB round-trip needed.
     """
+    from app.services.ingestion import get_live_ocr_progress
     db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
     if not db_file:
         raise HTTPException(status_code=404, detail="File not found.")
-    return FileStatusResponse.from_orm_file(db_file)
+    response = FileStatusResponse.from_orm_file(db_file)
+    progress = get_live_ocr_progress(file_id)
+    if progress:
+        response.ocr_pages_done, response.ocr_pages_total = progress
+    return response
 
 
 _IN_PROGRESS_STATUSES = {
