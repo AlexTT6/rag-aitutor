@@ -13,6 +13,7 @@ OCR_MIN_CHARS characters from it (default: 50).
 """
 
 import base64
+import gc
 import json
 import logging
 import os
@@ -34,8 +35,10 @@ OCR_MIN_CHARS = 50
 OCR_MIN_ALPHA_RATIO = 0.40
 # Render resolution — 96 DPI keeps image small = faster API call, quality fine for text
 OCR_DPI = 96
-# Hard pages (image-heavy, near-zero native text) get 2× resolution + detail=high
-OCR_HARD_DPI = 192
+# Hard pages (image-heavy, near-zero native text) use higher DPI + detail=high.
+# 144 DPI = 2× the base 72 DPI — sharp enough for Vision OCR, 44% smaller pixmap
+# than 192 DPI. Keeps peak memory below Railway's 512 MB limit on image-heavy PDFs.
+OCR_HARD_DPI = 144
 # Max parallel OCR requests to OpenAI.
 # Keep this low — Railway's gpt-4o-mini quota is 200K TPM.
 # 16 workers saturates the limit instantly when a fresh 45-page doc is uploaded.
@@ -81,7 +84,9 @@ def _render_page_b64(fitz_page: fitz.Page, dpi: int = OCR_DPI, quality: int = 85
     """
     mat = fitz.Matrix(dpi / 72, dpi / 72)
     pix = fitz_page.get_pixmap(matrix=mat)
-    return base64.b64encode(pix.tobytes("jpeg", jpg_quality=quality)).decode("utf-8")
+    jpeg_bytes = pix.tobytes("jpeg", jpg_quality=quality)
+    pix = None  # explicitly release ~10 MB pixmap before base64 encoding
+    return base64.b64encode(jpeg_bytes).decode("utf-8")
 
 
 def _load_ocr_cache(cache_path: str) -> Dict[int, str]:
@@ -407,6 +412,10 @@ def extract_pages(
                     )
 
         doc.close()
+        # Force-collect any lingering PyMuPDF pixmaps before spawning OCR threads.
+        # Without this, GC pressure from large pixmaps (10 MB each at 192 DPI) can
+        # exhaust Railway's 512 MB RAM on image-heavy PDFs.
+        gc.collect()
 
         if cache_hits:
             logger.info(f"[extractor] {cache_hits} pages served from OCR cache (no API call)")
