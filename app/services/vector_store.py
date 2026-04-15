@@ -186,6 +186,9 @@ def search_chunks(
 
 def count_by_file_id(file_id: str) -> int:
     client = get_client()
+    existing_names = [c.name for c in client.get_collections().collections]
+    if settings.QDRANT_COLLECTION not in existing_names:
+        return 0
     result = client.count(
         collection_name=settings.QDRANT_COLLECTION,
         count_filter=Filter(

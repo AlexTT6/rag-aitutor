@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -203,10 +204,11 @@ def _call_ocr_api(client, page_num: int, b64_image: str, detail: str, prompt: st
             exc_str = str(exc)
             is_rate_limit = "429" in exc_str or "rate_limit" in exc_str.lower() or "rate limit" in exc_str.lower()
             if is_rate_limit and rate_retry < _OCR_RATE_LIMIT_MAX_RETRIES - 1:
-                wait = _OCR_RATE_LIMIT_BASE_WAIT * (2 ** rate_retry)
+                # Jitter: spread retries across workers so they don't all wake simultaneously
+                wait = _OCR_RATE_LIMIT_BASE_WAIT * (2 ** rate_retry) + random.uniform(0.0, 1.5)
                 logger.warning(
                     f"[extractor] OCR_RATELIMIT page={page_num} attempt={attempt} "
-                    f"rate_retry={rate_retry} — waiting {wait:.0f}s before retry"
+                    f"rate_retry={rate_retry} — waiting {wait:.1f}s before retry"
                 )
                 time.sleep(wait)
                 last_exc = exc

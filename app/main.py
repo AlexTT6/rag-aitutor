@@ -179,9 +179,17 @@ async def lifespan(app: FastAPI):
         logger.error(f"[startup] file recovery failed (non-fatal): {e}")
 
     # Re-queue via executor — same bounded pool, respects MAX_CONCURRENT_JOBS.
+    # If more files are stuck than MAX_CONCURRENT_JOBS, the extras stay as
+    # "uploaded" in the DB and will be re-queued on the next server restart.
     for file_id in to_requeue:
-        submit_ingest(file_id)
-        logger.info(f"[startup] re-queued file_id={file_id}")
+        if submit_ingest(file_id):
+            logger.info(f"[startup] re-queued file_id={file_id}")
+        else:
+            logger.warning(
+                f"[startup] could not re-queue file_id={file_id} — "
+                f"pool at capacity. File remains 'uploaded' and will be "
+                f"retried on next restart."
+            )
 
     yield
 
@@ -251,9 +259,15 @@ def health() -> dict:
     except Exception as e:
         return {"status": "unhealthy", "detail": f"Database: {str(e)}"}
 
-    # Check Qdrant
+    # Check Qdrant reachable + collection exists
     try:
-        get_client().get_collections()
+        collections = get_client().get_collections()
+        names = [c.name for c in collections.collections]
+        if settings.QDRANT_COLLECTION not in names:
+            return {
+                "status": "unhealthy",
+                "detail": f"Qdrant collection '{settings.QDRANT_COLLECTION}' does not exist.",
+            }
     except Exception as e:
         return {"status": "unhealthy", "detail": f"Qdrant: {str(e)}"}
 

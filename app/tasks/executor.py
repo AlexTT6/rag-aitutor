@@ -53,7 +53,16 @@ def submit_ingest(file_id: str) -> bool:
             return False
         _active += 1
 
-    _executor.submit(_run, file_id)
+    try:
+        _executor.submit(_run, file_id)
+    except Exception as e:
+        # submit() can raise if the executor has been shut down.
+        # Roll back the counter we just incremented — otherwise the slot leaks.
+        with _lock:
+            _active -= 1
+        logger.error(f"[executor] failed to submit file_id={file_id}: {e}")
+        return False
+
     logger.info(f"[executor] queued file_id={file_id} active={_active}/{MAX_CONCURRENT_JOBS}")
     return True
 

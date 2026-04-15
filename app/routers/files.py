@@ -156,11 +156,15 @@ def reindex_file(
     if not os.path.exists(db_file.storage_path):
         raise HTTPException(status_code=404, detail="Original file not found on disk. Please re-upload.")
 
-    # Clean old vectors
+    # Clean old Qdrant vectors
     try:
         delete_by_file_id(file_id)
     except Exception:
         pass
+
+    # Clean old Postgres chunk rows — without this, reindex doubles the row count
+    from app.models.chunk import Chunk as ChunkModel
+    db.query(ChunkModel).filter(ChunkModel.file_id == file_id).delete()
 
     db_file.status = FileStatus.uploaded
     db_file.error_message = None
