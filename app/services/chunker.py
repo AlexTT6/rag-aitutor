@@ -102,14 +102,18 @@ def chunk_document(pages: List[PageContent]) -> List[Chunk]:
             i += step
         t_window += time.monotonic() - t0
 
-        # --- substep 4: decode ---
-        t0 = time.monotonic()
-        decoded = [_enc.decode(w) for w in windows]
-        t_decode += time.monotonic() - t0
-
-        # --- substep 5: filter + metadata construction ---
-        t0 = time.monotonic()
-        for window, raw in zip(windows, decoded):
+        # --- substeps 4+5: lazy-decode + filter in one pass ---
+        # Decode only windows that could possibly reach MIN_CHARS.
+        # ~6 chars/token is conservative for academic text; avoids decoding
+        # stub windows (e.g. the very last page sliver) that can never pass.
+        _MIN_TOKENS = max(1, MIN_CHARS // 6)
+        for window in windows:
+            if len(window) < _MIN_TOKENS:
+                continue
+            t0 = time.monotonic()
+            raw = _enc.decode(window)
+            t_decode += time.monotonic() - t0
+            t0 = time.monotonic()
             cleaned = raw.strip()
             if len(cleaned) >= MIN_CHARS:
                 all_chunks.append(
@@ -117,10 +121,10 @@ def chunk_document(pages: List[PageContent]) -> List[Chunk]:
                         page=page_content.page,
                         chunk_index=len(all_chunks),
                         text=cleaned,
-                        token_count=len(window),  # already computed — no extra encode()
+                        token_count=len(window),
                     )
                 )
-        t_filter += time.monotonic() - t0
+            t_filter += time.monotonic() - t0
 
     t_total = time.monotonic() - t_total_start
 
