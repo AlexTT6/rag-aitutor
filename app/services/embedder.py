@@ -53,7 +53,7 @@ def _get_openai_client() -> OpenAI:
     if _openai_client is None:
         with _openai_client_lock:
             if _openai_client is None:
-                _openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                _openai_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=10.0)
     return _openai_client
 
 

@@ -177,7 +177,7 @@ def _get_ocr_client():
         with _ocr_client_lock:
             if _ocr_client is None:
                 from openai import OpenAI
-                _ocr_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                _ocr_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=settings.OCR_TIMEOUT)
     return _ocr_client
 
 
