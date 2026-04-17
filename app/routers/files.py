@@ -1,16 +1,11 @@
 import logging
 import os
-import threading
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.tasks.executor import active_job_count, submit_ingest, MAX_CONCURRENT_JOBS
-
-# Limit concurrent ocr/missing background jobs to the same cap as the main executor.
-# Prevents unbounded thread spawning when multiple clients call ocr/missing in parallel.
-_ocr_missing_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 logger = logging.getLogger(__name__)
 
@@ -238,63 +233,6 @@ def ocr_page(
             if text.strip()
             else f"Page {page_num} OCR'd but produced no text."
         ),
-    }
-
-
-@router.post("/{file_id}/ocr/missing", status_code=202)
-def ocr_missing(
-    file_id: str,
-    db: Session = Depends(get_db),
-) -> dict:
-    """
-    Trigger background OCR for all pages that had no native text at index time.
-
-    Returns 202 immediately. OCR runs in the background thread pool.
-    When complete, file.ocr_completed is set to True.
-
-    This endpoint is a no-op if ocr_completed is already True — call reindex
-    first if you want to re-run OCR from scratch.
-    """
-    _validate_uuid(file_id)
-    from app.services.ocr_service import ocr_missing_pages
-    from app.tasks.executor import submit_ingest
-
-    db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
-    if not db_file:
-        raise HTTPException(status_code=404, detail="File not found.")
-    if db_file.status in _IN_PROGRESS_STATUSES:
-        raise HTTPException(status_code=409, detail="File is currently being indexed.")
-    if db_file.ocr_completed:
-        return {"file_id": file_id, "status": "already_completed", "message": "OCR was already run for this file."}
-
-    pages = list(db_file.empty_pages or [])
-    if not pages:
-        db_file.ocr_completed = True
-        db.commit()
-        return {"file_id": file_id, "status": "nothing_to_ocr", "pages_count": 0}
-
-    def _run_ocr_missing():
-        if not _ocr_missing_semaphore.acquire(blocking=False):
-            logger.warning(f"[files] ocr_missing rejected file_id={file_id} — semaphore full")
-            return
-        from app.database import SessionLocal
-        _db = SessionLocal()
-        try:
-            ocr_missing_pages(file_id, _db)
-        except Exception as e:
-            logger.error(f"[files] ocr_missing background failed file_id={file_id}: {e}")
-        finally:
-            _db.close()
-            _ocr_missing_semaphore.release()
-
-    t = threading.Thread(target=_run_ocr_missing, daemon=True, name=f"ocr-missing-{file_id[:8]}")
-    t.start()
-
-    return {
-        "file_id": file_id,
-        "status": "started",
-        "pages_count": len(pages),
-        "message": f"OCR started for {len(pages)} pages. Poll GET /files/{file_id} to monitor.",
     }
 
 
