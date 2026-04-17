@@ -68,16 +68,31 @@ def ocr_single_page(file_id: str, page_num: int, db: Session) -> str:
     t0 = time.monotonic()
     doc = fitz.open(db_file.storage_path)
     try:
-        total_pages = len(doc)
-        if page_num < 1 or page_num > total_pages:
-            raise ValueError(f"Page {page_num} out of range (1–{total_pages})")
-        fitz_page = doc[page_num - 1]   # fitz is 0-indexed
-        native_text = fitz_page.get_text("text").strip()
-        is_hard = len(native_text) < OCR_MIN_CHARS
-        dpi = OCR_HARD_DPI if is_hard else OCR_DPI
-        b64 = _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85)
+        return _ocr_single_page_with_doc(doc, db_file, page_num, db, t0=t0)
     finally:
-        doc.close()   # always release — even if render raises
+        doc.close()
+
+
+def _ocr_single_page_with_doc(
+    doc: fitz.Document, db_file, page_num: int, db: Session, *, t0: float = None
+) -> str:
+    """
+    OCR one page using an already-open fitz.Document.
+    Called by ocr_single_page (which owns the doc lifetime) and by
+    ocr_missing_pages (which opens the doc once for all pages).
+    """
+    if t0 is None:
+        t0 = time.monotonic()
+    file_id = str(db_file.id)
+
+    total_pages = len(doc)
+    if page_num < 1 or page_num > total_pages:
+        raise ValueError(f"Page {page_num} out of range (1–{total_pages})")
+    fitz_page = doc[page_num - 1]   # fitz is 0-indexed
+    native_text = fitz_page.get_text("text").strip()
+    is_hard = len(native_text) < OCR_MIN_CHARS
+    dpi = OCR_HARD_DPI if is_hard else OCR_DPI
+    b64 = _render_page_b64(fitz_page, dpi=dpi, quality=95 if is_hard else 85)
 
     logger.info(
         f"[ocr_service] OCR_SINGLE file_id={file_id} page={page_num} "
@@ -180,16 +195,24 @@ def ocr_missing_pages(file_id: str, db: Session) -> int:
         db.commit()
         return 0
 
+    import os
+    if not os.path.exists(db_file.storage_path):
+        raise ValueError(f"PDF not on disk: {db_file.storage_path}")
+
     logger.info(f"[ocr_service] OCR_MISSING START file_id={file_id} pages={pages}")
     success_count = 0
 
-    for page_num in pages:
-        try:
-            text = ocr_single_page(file_id, page_num, db)
-            if text.strip():
-                success_count += 1
-        except Exception as e:
-            logger.error(f"[ocr_service] OCR_MISSING failed page={page_num}: {e}")
+    doc = fitz.open(db_file.storage_path)
+    try:
+        for page_num in pages:
+            try:
+                text = _ocr_single_page_with_doc(doc, db_file, page_num, db)
+                if text.strip():
+                    success_count += 1
+            except Exception as e:
+                logger.error(f"[ocr_service] OCR_MISSING failed page={page_num}: {e}")
+    finally:
+        doc.close()
 
     db_file = db.query(File).filter(File.id == file_id).first()
     if db_file:
