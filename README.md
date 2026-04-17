@@ -12,7 +12,7 @@ PDF ingestion and semantic retrieval backend for a Socratic AI tutor.
 
 Accepts PDF course materials, extracts and indexes their text, and returns the most relevant chunks for any query. Built specifically to support a Socratic tutoring agent that retrieves course content before asking students questions.
 
-**In scope:** PDF upload → text extraction → chunking → embedding → vector storage → semantic retrieval → on-demand OCR  
+**In scope:** PDF upload → text extraction → chunking → embedding → vector storage → semantic retrieval → automatic background OCR  
 **Out of scope:** answer generation, Socratic logic, conversation memory, any user-facing UI
 
 ---
@@ -26,25 +26,26 @@ Upload
     → save to persistent disk (/data/storage)
     → background ingestion:
         PyMuPDF → native text extraction
-        pages with < 50 chars → recorded in empty_pages (not OCR'd yet)
+        pages with < 50 chars → recorded in empty_pages
         token-based chunking (400 tok / 50 overlap, cl100k_base)
         OpenAI text-embedding-3-small → 1536d vectors
         Qdrant + Postgres
     → status: indexed in ~2–3 seconds
+    → auto-triggers background OCR immediately after indexed:
+        GPT-4o-mini Vision on all empty_pages (up to 8 parallel)
+        re-chunks, re-embeds, updates index
+        ocr_completed=true when done (~30–90s depending on page count)
 
 Retrieve
   POST /retrieve
     → embed query (OpenAI)
     → Qdrant cosine search, filtered by course_id
     → returns chunks with score, low_confidence flag, page number
-    → returns has_unindexed_pages: true if OCR pages remain
 
-On-Demand OCR (triggered by agent, not during upload)
+On-Demand OCR (ad-hoc, single page)
   POST /files/{id}/ocr/page   → single page, synchronous (~4 sec)
-  POST /files/{id}/ocr/missing → all empty pages, background (~6 sec/page)
     → GPT-4o-mini Vision
     → re-chunks, re-embeds, updates index
-    → removes page from empty_pages when done
 ```
 
 ---
@@ -77,7 +78,6 @@ On-Demand OCR (triggered by agent, not during upload)
 | `DELETE` | `/files/{id}` | Delete file, chunks, and vectors |
 | `POST` | `/files/{id}/reindex` | Re-run ingestion on existing file |
 | `POST` | `/files/{id}/ocr/page` | OCR a single page on demand |
-| `POST` | `/files/{id}/ocr/missing` | Background OCR for all empty pages |
 | `POST` | `/retrieve` | Semantic search across course files |
 
 ---
@@ -141,7 +141,6 @@ uploaded → processing → extracting → chunking → embedding → indexed
 
 - `score` — cosine similarity (0–1). Above 0.40 is usable.
 - `low_confidence` — true when score is below threshold
-- `has_unindexed_pages` — agent signal: call `/ocr/missing` if results are weak
 
 ---
 
