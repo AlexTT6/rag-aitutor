@@ -1,98 +1,67 @@
-# RAG Backend Service
+# RAG Backend — AI Tutor Search Service
 
-Document ingestion and retrieval service for an AI tutor system.
+PDF ingestion and semantic retrieval backend for a Socratic AI tutor.
 
-Handles: PDF upload → text extraction → chunking → embedding → vector storage → semantic retrieval.
+**Live API:** `https://rag-aitutor-production.up.railway.app`  
+**API Docs:** `https://rag-aitutor-production.up.railway.app/docs`  
+**Agent Integration Guide:** [`AGENT_INTEGRATION.md`](./AGENT_INTEGRATION.md)
 
-Does **not** handle: answer generation, tutor logic, Socratic modes, quiz generation, Telegram, or any user-facing interface.
+---
+
+## What It Does
+
+Accepts PDF course materials, extracts and indexes their text, and returns the most relevant chunks for any query. Built specifically to support a Socratic tutoring agent that retrieves course content before asking students questions.
+
+**In scope:** PDF upload → text extraction → chunking → embedding → vector storage → semantic retrieval → on-demand OCR  
+**Out of scope:** answer generation, Socratic logic, conversation memory, any user-facing UI
 
 ---
 
 ## Architecture
 
 ```
-POST /files/upload
-  → validate → save PDF → create DB record → background ingestion task
-  → extract text (PyMuPDF) → chunk (sentence-aware) → embed → Qdrant + Postgres
-  → status: uploaded → processing → indexed | failed
+Upload
+  POST /files/upload
+    → validate (PDF, size, course exists)
+    → save to persistent disk (/data/storage)
+    → background ingestion:
+        PyMuPDF → native text extraction
+        pages with < 50 chars → recorded in empty_pages (not OCR'd yet)
+        token-based chunking (400 tok / 50 overlap, cl100k_base)
+        OpenAI text-embedding-3-small → 1536d vectors
+        Qdrant + Postgres
+    → status: indexed in ~2–3 seconds
 
-POST /retrieve
-  → embed query → Qdrant search (filtered by course_id) → Postgres metadata lookup
-  → return ranked chunks with page, filename, score, low_confidence flag
-```
+Retrieve
+  POST /retrieve
+    → embed query (OpenAI)
+    → Qdrant cosine search, filtered by course_id
+    → returns chunks with score, low_confidence flag, page number
+    → returns has_unindexed_pages: true if OCR pages remain
 
-## Authorization model
-
-This service does not enforce caller authorization. It assumes all requests come from a trusted upstream agent. It must not be publicly routable without a gateway or network-level access control.
-
-## Consistency model
-
-No cross-system transactions between Postgres and Qdrant. Ordering of operations (Qdrant first on insert, Qdrant first on delete) minimizes orphan risk. Startup recovery re-queues files stuck in `processing` after a crash.
-
----
-
-## Quick start
-
-```bash
-cp .env.example .env
-# Edit .env — set DATABASE_URL and OPENAI_API_KEY
-
-docker compose up -d
-
-pip install -r requirements.txt
-
-# Create tables (or run Alembic migrations)
-python -c "from app.database import engine; from app.models import Base; Base.metadata.create_all(engine)"
-
-uvicorn app.main:app --reload
-```
-
-API docs available at `http://localhost:8000/docs`.
-
----
-
-## Alembic migrations
-
-```bash
-# Generate initial migration from current models
-alembic revision --autogenerate -m "initial"
-
-# Apply migrations
-alembic upgrade head
+On-Demand OCR (triggered by agent, not during upload)
+  POST /files/{id}/ocr/page   → single page, synchronous (~4 sec)
+  POST /files/{id}/ocr/missing → all empty pages, background (~6 sec/page)
+    → GPT-4o-mini Vision
+    → re-chunks, re-embeds, updates index
+    → removes page from empty_pages when done
 ```
 
 ---
 
-## Running tests
+## Stack
 
-```bash
-pip install pytest pytest-asyncio
-pytest tests/ -v
-```
-
-Tests use SQLite in-memory. No running Postgres or Qdrant required.
-
----
-
-## Configuration
-
-All settings via environment variables (see `.env.example`):
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | required | Postgres connection string |
-| `QDRANT_HOST` | `localhost` | Qdrant host |
-| `QDRANT_PORT` | `6333` | Qdrant port |
-| `QDRANT_COLLECTION` | `course_chunks` | Collection name |
-| `EMBEDDING_PROVIDER` | `openai` | `openai` or `local` |
-| `OPENAI_API_KEY` | required if openai | OpenAI API key |
-| `STORAGE_PATH` | `./storage` | Local PDF storage directory |
-| `MAX_FILE_SIZE_MB` | `50` | Upload size cap |
-| `MAX_PAGES` | `300` | Max PDF pages (total, not extractable) |
-| `TOP_K_DEFAULT` | `5` | Default retrieval results |
-| `TOP_K_MAX` | `20` | Maximum top_k allowed |
-| `RETRIEVAL_SCORE_THRESHOLD` | `0.70` | Below this score → `low_confidence: true` |
-| `MIN_EXTRACTABLE_RATIO` | `0.50` | Fail ingestion if fewer than 50% of pages have text |
+| Component | Technology |
+|---|---|
+| API | FastAPI |
+| Vector DB | Qdrant (named vector "dense", cosine) |
+| Relational DB | PostgreSQL |
+| Embeddings | OpenAI `text-embedding-3-small` (1536d) |
+| OCR | OpenAI `gpt-4o-mini` Vision |
+| PDF parsing | PyMuPDF (fitz) |
+| Tokenizer | tiktoken `cl100k_base` |
+| Hosting | Railway ($5/month) |
+| Storage | Railway persistent Volume at `/data` |
 
 ---
 
@@ -100,31 +69,129 @@ All settings via environment variables (see `.env.example`):
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/courses` | Create a course |
-| `GET` | `/courses/{course_id}/files` | List files in a course |
-| `POST` | `/files/upload` | Upload a PDF for ingestion |
-| `GET` | `/files/{file_id}` | Poll ingestion status |
-| `DELETE` | `/files/{file_id}` | Delete file + chunks + vectors |
-| `POST` | `/retrieve` | Retrieve relevant chunks for a query |
 | `GET` | `/health` | Health check |
+| `POST` | `/courses` | Create a course |
+| `GET` | `/courses/{id}/files` | List files in a course |
+| `POST` | `/files/upload` | Upload and index a PDF |
+| `GET` | `/files/{id}` | Poll indexing status |
+| `DELETE` | `/files/{id}` | Delete file, chunks, and vectors |
+| `POST` | `/files/{id}/reindex` | Re-run ingestion on existing file |
+| `POST` | `/files/{id}/ocr/page` | OCR a single page on demand |
+| `POST` | `/files/{id}/ocr/missing` | Background OCR for all empty pages |
+| `POST` | `/retrieve` | Semantic search across course files |
 
 ---
 
-## File statuses
+## File Status Flow
+
+```
+uploaded → processing → extracting → chunking → embedding → indexed
+                                                           ↘ failed
+```
 
 | Status | Meaning |
 |---|---|
-| `uploaded` | Saved to disk, ingestion not yet started |
-| `processing` | Background ingestion task is running |
-| `indexed` | All chunks embedded and stored |
+| `uploaded` | Saved to disk, queued for ingestion |
+| `processing` | Background task started |
+| `extracting` | PyMuPDF reading pages |
+| `chunking` | Text being split into chunks |
+| `embedding` | OpenAI embedding in progress |
+| `indexed` | Ready for retrieval |
 | `failed` | Pipeline error — see `error_message` |
 
 ---
 
-## Known limitations (MVP)
+## File Response Fields
 
-- **BackgroundTasks**: ingestion runs in the web server process. Migrate to Celery/ARQ for production.
-- **Chunker**: regex sentence splitting is a baseline. Replace with `nltk` or `spacy` for robustness.
-- **No retry**: failed files must be re-uploaded manually.
-- **Local storage**: PDFs are stored on local disk. Replace `storage_path` logic with S3/GCS for multi-instance deployments.
-- **No auth**: trusted upstream model only. Add API key middleware before exposing beyond private network.
+```json
+{
+  "file_id": "...",
+  "status": "indexed",
+  "chunk_count": 60,
+  "total_page_count": 82,
+  "empty_pages": [4, 9, 14, 78],
+  "ocr_completed": false,
+  "file_exists": true
+}
+```
+
+- `empty_pages` — pages with < 50 chars of native text, not yet OCR'd
+- `ocr_completed` — true when all empty pages have been processed
+- `file_exists` — false means PDF was lost (should not happen with volume mounted)
+
+---
+
+## Retrieve Response
+
+```json
+{
+  "results": [
+    {
+      "text": "...",
+      "score": 0.61,
+      "low_confidence": false,
+      "page": 34,
+      "file_id": "...",
+      "filename": "calculus.pdf"
+    }
+  ],
+  "has_unindexed_pages": true
+}
+```
+
+- `score` — cosine similarity (0–1). Above 0.40 is usable.
+- `low_confidence` — true when score is below threshold
+- `has_unindexed_pages` — agent signal: call `/ocr/missing` if results are weak
+
+---
+
+## Quick Start (local)
+
+```bash
+cp .env.example .env
+# Set DATABASE_URL, OPENAI_API_KEY, QDRANT_HOST
+
+docker compose up -d   # starts Postgres + Qdrant
+
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+API docs at `http://localhost:8000/docs`
+
+---
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | required | Postgres connection string |
+| `OPENAI_API_KEY` | required | OpenAI API key |
+| `QDRANT_HOST` | `localhost` | Qdrant host |
+| `QDRANT_PORT` | `6333` | Qdrant port |
+| `QDRANT_COLLECTION` | `course_chunks` | Collection name |
+| `STORAGE_PATH` | `/data/storage` | PDF storage (use Railway Volume at `/data`) |
+| `MAX_FILE_SIZE_MB` | `50` | Upload size limit |
+| `MAX_PAGES` | `300` | Max pages per PDF |
+| `TOP_K_DEFAULT` | `5` | Default retrieval results |
+| `TOP_K_MAX` | `20` | Max top_k |
+| `RETRIEVAL_SCORE_THRESHOLD` | `0.35` | Below this → `low_confidence: true` |
+
+---
+
+## Running Tests
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+Tests use SQLite in-memory. No Postgres or Qdrant required.
+
+---
+
+## Known Limitations
+
+- **No authentication** — all endpoints are open. Add API key middleware before exposing publicly.
+- **Single-process executor** — ingestion runs in a bounded thread pool (not Celery). Fine for low concurrency; migrate for high load.
+- **Garbled native text** — pages that extract text but with broken Unicode or scan artifacts pass the OCR threshold and index with low-quality chunks. Retrieval score will be low and flagged.
