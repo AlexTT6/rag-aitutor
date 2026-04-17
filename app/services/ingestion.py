@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -188,6 +189,32 @@ def run_ingestion(file_id: str, db: Session) -> None:
             f"chunks={len(db_chunks)} "
             f"total_elapsed={time.monotonic()-t_start:.1f}s"
         )
+
+        # Auto-trigger background OCR for pages that had no native text.
+        # Uses a fresh DB session — the current one is owned by ingest_task and
+        # will be closed by the time the thread runs.
+        empty = extraction.empty_page_numbers
+        if empty:
+            logger.info(
+                f"[ingestion] auto-OCR queued for file_id={file_id}, pages={len(empty)}"
+            )
+
+            def _background_ocr(fid: str = file_id) -> None:
+                from app.database import SessionLocal
+                from app.services.ocr_service import ocr_missing_pages
+                _db = SessionLocal()
+                try:
+                    ocr_missing_pages(fid, _db)
+                except Exception as _e:
+                    logger.error(f"[ingestion] auto-OCR failed file_id={fid}: {_e}")
+                finally:
+                    _db.close()
+
+            threading.Thread(
+                target=_background_ocr,
+                daemon=True,
+                name=f"ocr-auto-{file_id[:8]}",
+            ).start()
 
     except Exception as e:
         _live_ocr.pop(file_id, None)  # clean up progress entry on failure
