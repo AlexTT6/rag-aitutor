@@ -45,13 +45,12 @@ def retrieve(
     hits = search_chunks(query_vector, str(req.course_id), top_k)
 
     # Check if any file in this course has unindexed pages (for agent awareness).
-    # Fetch candidates then filter in Python — JSON array length is DB-specific SQL.
-    _candidates = db.query(FileModel).filter(
+    # .first() stops at the first match — no need to load all rows into memory.
+    has_unindexed = db.query(FileModel.id).filter(
         FileModel.course_id == str(req.course_id),
         FileModel.ocr_completed == False,   # noqa: E712
         FileModel.empty_pages != None,       # noqa: E711
-    ).all()
-    has_unindexed = any(len(f.empty_pages or []) > 0 for f in _candidates)
+    ).first() is not None
 
     if not hits:
         logger.info(f"[retrieve] no results query='{req.query[:60]}'")
