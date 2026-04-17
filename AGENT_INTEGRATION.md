@@ -22,7 +22,7 @@ file_id:   3adb50cc-df18-4f12-ae71-1ade493ff38b  (82-page calculus PDF, 60 chunk
 
 ---
 
-## The Three Endpoints You Need
+## The Two Endpoints You Need
 
 ### 1. Retrieve — called on every student message
 
@@ -52,40 +52,17 @@ POST /retrieve
       "filename": "calculus.pdf"
     }
   ],
-  "has_unindexed_pages": true
+  "has_unindexed_pages": false
 }
 ```
 
 **What to check:**
 - `results[0].score` — quality of the match (0.0 to 1.0)
 - `low_confidence: true` — score is below threshold, result may be weak
-- `has_unindexed_pages: true` — some pages were not OCR'd yet, better results possible after OCR
 
 ---
 
-### 2. OCR Missing Pages — trigger in background when results are weak
-
-```
-POST /files/{file_id}/ocr/missing
-```
-
-No request body needed.
-
-**Response (immediate, 202):**
-```json
-{
-  "status": "started",
-  "pages_count": 22,
-  "message": "OCR started for 22 pages. Poll GET /files/{file_id} to monitor."
-}
-```
-
-OCR runs in the background (~130 seconds for 22 pages).
-**Do not wait for it.** Fire and continue the conversation.
-
----
-
-### 3. OCR Single Page — when student asks about a specific page
+### 2. OCR Single Page — when student asks about a specific page
 
 ```
 POST /files/{file_id}/ocr/page
@@ -134,11 +111,6 @@ def retrieve(query: str) -> dict:
     return r.json()
 
 
-def ocr_missing():
-    """Fire and forget — do not await."""
-    requests.post(f"{BASE_URL}/files/{FILE_ID}/ocr/missing", timeout=10)
-
-
 def ocr_page(page_num: int):
     """Synchronous — waits ~4 seconds."""
     r = requests.post(f"{BASE_URL}/files/{FILE_ID}/ocr/page",
@@ -154,16 +126,12 @@ def get_context(student_message: str) -> tuple[str, bool]:
     """
     response = retrieve(student_message)
     results = response.get("results", [])
-    has_unindexed = response.get("has_unindexed_pages", False)
 
     if not results:
         return "", False
 
     top_score = results[0]["score"]
     is_strong = top_score >= SCORE_THRESHOLD
-
-    if not is_strong and has_unindexed:
-        ocr_missing()  # start OCR in background, don't wait
 
     context = "\n\n".join(r["text"] for r in results)
     return context, is_strong
@@ -181,8 +149,7 @@ context, is_strong = get_context("I don't understand limits")
     │
     ├── is_strong = True  →  use context, ask Socratic question based on real text
     │
-    └── is_strong = False →  ocr_missing() fired in background
-                             ask opening Socratic question to student:
+    └── is_strong = False →  ask opening Socratic question to student:
                              "What do you already know about this topic?"
 
 Student: "I think it's when x goes to infinity..."
@@ -194,8 +161,7 @@ context, is_strong = get_context("x goes to infinity limits")
     │                        correct → ask deeper question
     │                        incorrect → ask guiding question toward correct answer
     │
-    └── is_strong = False →  OCR may still be running
-                             use what's available, ask another Socratic question
+    └── is_strong = False →  use what's available, ask another Socratic question
 ```
 
 **Rule:** Call `get_context()` on every student message except pure acknowledgements ("ok", "thanks", "got it").
@@ -204,7 +170,7 @@ context, is_strong = get_context("x goes to infinity limits")
 
 ## Checking OCR Status (optional)
 
-If you want to know when OCR is done:
+If you want to know when background OCR (auto-triggered after upload) is done:
 
 ```
 GET /files/{file_id}
@@ -234,6 +200,7 @@ course_id: 319cc001-692c-4078-9bc7-84e67367ed9b
 ```
 
 Then poll `GET /files/{file_id}` until `status: "indexed"` (usually 2–5 seconds for a normal PDF).
+OCR starts automatically in the background immediately after indexing completes.
 
 ---
 
@@ -243,7 +210,7 @@ Then poll `GET /files/{file_id}` until `status: "indexed"` (usually 2–5 second
 |-------|---------|------------|
 | ≥ 0.60 | Strong match | Use directly |
 | 0.40 – 0.59 | Moderate match | Use, but verify with Socratic question |
-| < 0.40 | Weak match | Trigger OCR if `has_unindexed_pages`, ask opening question |
+| < 0.40 | Weak match | Ask opening Socratic question |
 | 0 results | Nothing found | Ask student to rephrase |
 
 ---
