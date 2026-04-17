@@ -44,7 +44,7 @@ OCR_HARD_DPI = 144
 # Keep this low — Railway's gpt-4o-mini quota is 200K TPM.
 # 16 workers saturates the limit instantly when a fresh 45-page doc is uploaded.
 # 4 workers staggers requests enough to stay within quota on first index.
-OCR_MAX_WORKERS = 4
+OCR_MAX_WORKERS = 8
 
 
 def _is_good_text(text: str) -> bool:
